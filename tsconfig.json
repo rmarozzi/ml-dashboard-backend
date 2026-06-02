@@ -2,15 +2,15 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
-    "lib": ["ES2020"],
-    "typeRoots": ["./node_modules/@types"],
+    "lib": ["ES2020", "ES2015"],
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "noEmit": false
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
