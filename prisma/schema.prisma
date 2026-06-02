@@ -1,0 +1,258 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int       @id @default(autoincrement())
+  email       String    @unique
+  name        String?
+  password    String
+  role        String    @default("lider") // "admin" | "lider" | "funcionario"
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  lastLoginAt DateTime?
+  lastSyncAt  DateTime?
+  settings    String?   // JSON
+  liderId     Int?
+  adminNotes  String?
+
+  lider               User?               @relation("FuncionarioLider", fields: [liderId], references: [id])
+  funcionarios        User[]              @relation("FuncionarioLider")
+  tokens              Token[]
+  orders              Order[]
+  productCosts        ProductCost[]
+  sessions            Session[]
+  subscription        Subscription?
+  employeePermission  EmployeePermission? @relation("FuncPermission")
+  employeeMlAccess    EmployeeMlAccess[]
+  syncLogs            SyncLog[]
+  adminAlerts         AdminAlert[]        @relation("AlertClient")
+  resolvedAlerts      AdminAlert[]        @relation("AlertResolver")
+  planChanges         PlanChange[]        @relation("PlanChangeUser")
+  changedPlans        PlanChange[]        @relation("PlanChangedBy")
+  updatedPermissions  EmployeePermission[] @relation("PermissionAdmin")
+}
+
+model Plan {
+  id                  Int      @id @default(autoincrement())
+  nome                String
+  slug                String   @unique
+  preco               Float
+  maxMlAccounts       Int      @default(1)
+  maxFuncionarios     Int      @default(0)
+  maxSyncOrders       Int      @default(50)
+  autoSync            Boolean  @default(false)
+  granularPermissions Boolean  @default(false)
+  mlAccessControl     Boolean  @default(false)
+  canExport           Boolean  @default(false)
+  canViewAnalytics    Boolean  @default(false)
+  canViewProfit       Boolean  @default(false)
+  canManageCosts      Boolean  @default(false)
+  canDebugSync        Boolean  @default(false)
+  supportSla          Boolean  @default(false)
+  active              Boolean  @default(true)
+
+  subscriptions Subscription[]
+  planChangesTo PlanChange[]   @relation("PlanChangeTo")
+  planChangesFrom PlanChange[] @relation("PlanChangeFrom")
+}
+
+model Subscription {
+  id                 Int       @id @default(autoincrement())
+  userId             Int       @unique
+  planId             Int
+  status             String    @default("active") // "active"|"cancelled"|"past_due"|"trial"
+  currentPeriodStart DateTime  @default(now())
+  currentPeriodEnd   DateTime
+  cancelledAt        DateTime?
+  gatewayId          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan @relation(fields: [planId], references: [id])
+}
+
+model Token {
+  id           Int      @id @default(autoincrement())
+  accessToken  String
+  refreshToken String
+  expiresAt    DateTime
+  userId       Int
+  apelido      String?
+  mlUserId     String?
+  mlNickname   String?
+
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders           Order[]
+  syncLogs         SyncLog[]
+  adminAlerts      AdminAlert[]
+  employeeMlAccess EmployeeMlAccess[]
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique
+  userId    Int
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id          Int      @id @default(autoincrement())
+  mlId        String   @unique
+  status      String
+  totalAmount Float
+  netReceived Float?
+  dateCreated DateTime
+  userId      Int
+  tokenId     Int
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token    Token     @relation(fields: [tokenId], references: [id])
+  items    Item[]
+  payments Payment[]
+  shipment Shipment?
+}
+
+model Item {
+  id        Int    @id @default(autoincrement())
+  orderId   Int
+  mlItemId  String?
+  title     String
+  quantity  Int
+  unitPrice Float
+  sku       String?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id              Int    @id @default(autoincrement())
+  orderId         Int
+  mlPaymentId     String?
+  status          String
+  totalPaidAmount Float
+  taxesAmount     Float  @default(0)
+  operationType   String @default("regular_payment")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Shipment {
+  id           Int      @id @default(autoincrement())
+  orderId      Int      @unique
+  mlShipmentId String?
+  status       String
+  trackingNumber String?
+  cost         Float?
+  dateCreated  DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model ProductCost {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  sku       String
+  name      String
+  cost      Float
+  taxRate   Float    @default(0)
+  validFrom DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sku, validFrom])
+}
+
+model EmployeePermission {
+  id              Int      @id @default(autoincrement())
+  funcionarioId   Int      @unique
+  liderId         Int
+  viewOrders      Boolean  @default(false)
+  viewProfit      Boolean  @default(false)
+  viewShipments   Boolean  @default(false)
+  viewAnalytics   Boolean  @default(false)
+  manageCosts     Boolean  @default(false)
+  exportData      Boolean  @default(false)
+  syncMl          Boolean  @default(false)
+  updatedByAdminId Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  funcionario  User  @relation("FuncPermission", fields: [funcionarioId], references: [id], onDelete: Cascade)
+  updatedByAdmin User? @relation("PermissionAdmin", fields: [updatedByAdminId], references: [id])
+}
+
+model EmployeeMlAccess {
+  id           Int @id @default(autoincrement())
+  funcionarioId Int
+  tokenId      Int
+  liderId      Int
+
+  funcionario User  @relation(fields: [funcionarioId], references: [id], onDelete: Cascade)
+  token       Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([funcionarioId, tokenId])
+}
+
+model AdminAlert {
+  id          Int       @id @default(autoincrement())
+  type        String
+  severity    String    // "critical" | "warning" | "info"
+  clientId    Int
+  tokenId     Int?
+  description String
+  metadata    String?   // JSON
+  status      String    @default("open") // "open" | "resolved"
+  resolvedAt  DateTime?
+  resolvedBy  Int?
+  resolvedNote String?
+  createdAt   DateTime  @default(now())
+
+  client   User   @relation("AlertClient", fields: [clientId], references: [id], onDelete: Cascade)
+  resolver User?  @relation("AlertResolver", fields: [resolvedBy], references: [id])
+  token    Token? @relation(fields: [tokenId], references: [id])
+
+  @@index([clientId, type, status])
+}
+
+model SyncLog {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  tokenId       Int
+  status        String   // "success" | "failed" | "partial"
+  ordersNew     Int      @default(0)
+  ordersUpdated Int      @default(0)
+  errorMessage  String?
+  durationMs    Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token Token @relation(fields: [tokenId], references: [id])
+}
+
+model PlanChange {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  fromPlanId Int?
+  toPlanId   Int
+  changeType String   // "new"|"upgrade"|"downgrade"|"cancel"|"reactivate"
+  changedBy  Int?
+  createdAt  DateTime @default(now())
+
+  user      User  @relation("PlanChangeUser", fields: [userId], references: [id], onDelete: Cascade)
+  admin     User? @relation("PlanChangedBy", fields: [changedBy], references: [id])
+  fromPlan  Plan? @relation("PlanChangeFrom", fields: [fromPlanId], references: [id])
+  toPlan    Plan  @relation("PlanChangeTo", fields: [toPlanId], references: [id])
+}
