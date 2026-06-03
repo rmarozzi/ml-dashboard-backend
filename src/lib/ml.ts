@@ -50,7 +50,7 @@ export async function getValidToken(tokenId: number) {
 
 export function buildOAuthUrl(state: string): string {
   const redirectUri = process.env.ML_REDIRECT_URI!;
-  return `${ML_BASE}/authorization?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+  return `https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
 }
 
 export async function exchangeCode(code: string): Promise<any> {
