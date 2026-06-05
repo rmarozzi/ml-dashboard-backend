@@ -71,15 +71,16 @@ export async function syncOrdersForUser(userId: number) {
 
             for (const item of mlOrder.order_items ?? []) {
               await prisma.item.create({
-                data: {
-                  orderId: created.id,
-                  mlItemId: String(item.item?.id ?? ""),
-                  title: item.item?.title ?? "—",
-                  quantity: item.quantity,
-                  unitPrice: item.unit_price,
-                  sku: item.item?.seller_sku ?? null,
-                },
-              });
+  data: {
+    orderId: created.id,
+    mlItemId: String(item.item?.id ?? ""),
+    title: item.item?.title ?? "—",
+    quantity: item.quantity,
+    unitPrice: item.unit_price,
+    sku: item.item?.seller_sku ?? null,
+    saleFee: item.sale_fee ?? 0,
+  },
+});
             }
 
             for (const pay of mlOrder.payments ?? []) {

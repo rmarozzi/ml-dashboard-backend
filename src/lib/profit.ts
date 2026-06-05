@@ -3,14 +3,25 @@ import prisma from "./prisma";
 export async function calculateOrderProfit(orderId: number) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: true, payments: true },
+    include: { items: true, payments: true, shipment: true },
   });
   if (!order) return null;
 
-  // Sum net received from payments
-  const netReceived = order.netReceived ?? order.payments.reduce((acc, p) => acc + p.totalPaidAmount, 0);
-  const taxesAmount = order.payments.reduce((acc, p) => acc + p.taxesAmount, 0);
+  // Receita bruta = valor total do pedido
+  const grossRevenue = order.totalAmount;
 
+  // Tarifa ML = soma dos sale_fee de cada item
+  const mlFee = order.items.reduce((acc, item) => acc + (item.saleFee ?? 0), 0);
+
+  // Frete cobrado do vendedor
+  const shippingCost = order.shipment?.cost ?? 0;
+
+  // Estorno = payments com operationType diferente de regular_payment (ex: reembolso parcial do ML)
+  const estorno = order.payments
+    .filter(p => p.operationType !== "regular_payment")
+    .reduce((acc, p) => acc + p.totalPaidAmount, 0);
+
+  // Custo do produto + imposto NF
   let productCostTotal = 0;
   let nfTaxTotal = 0;
   let allCostsFound = true;
@@ -35,14 +46,18 @@ export async function calculateOrderProfit(orderId: number) {
     nfTaxTotal += itemTax;
   }
 
-  const profit = netReceived - productCostTotal - nfTaxTotal - taxesAmount;
-  const margin = order.totalAmount > 0 ? (profit / order.totalAmount) * 100 : 0;
+  // Fórmula final:
+  // Lucro = Receita Bruta - Tarifa ML - Frete - Custo Produto - Imposto NF + Estorno
+  const profit = grossRevenue - mlFee - shippingCost - productCostTotal - nfTaxTotal + estorno;
+  const margin = grossRevenue > 0 ? (profit / grossRevenue) * 100 : 0;
 
   return {
-    netReceived,
+    grossRevenue,
+    mlFee,
+    shippingCost,
+    estorno,
     productCost: productCostTotal,
     nfTax: nfTaxTotal,
-    mlFees: taxesAmount,
     profit,
     margin: parseFloat(margin.toFixed(2)),
     allCostsFound,

@@ -132,6 +132,7 @@ model Item {
   quantity  Int
   unitPrice Float
   sku       String?
+  saleFee   Float  @default(0)   // ← adicione esta linha
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
