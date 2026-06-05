@@ -117,10 +117,12 @@ const mlRes = await mlClient.get("/orders/search", {
           ordersUpdated++;
         }
       }
-    } catch (err: any) {
-      status = "failed";
-      errorMessage = err?.message ?? "Sync error";
-    }
+	} catch (err: any) {
+  	status = "failed";
+  	errorMessage = err?.response?.data
+   	 ? JSON.stringify(err.response.data)
+   	 : err?.message ?? "Sync error";
+	}
 
     const durationMs = Date.now() - start;
     await prisma.syncLog.create({
