@@ -26,13 +26,28 @@ export async function syncOrdersForUser(userId: number, planSlug: string) {
       const validToken = await getValidToken(token.id);
       const mlClient = getMlClient(validToken.accessToken);
 
-      const mlRes = await mlClient.get("/orders/search", {
-        params: {
-          seller: validToken.mlUserId,
-          sort: "date_desc",
-          limit,
-        },
-      });
+// Se mlUserId não estiver salvo, busca da API do ML
+let sellerId = validToken.mlUserId;
+if (!sellerId) {
+  const meRes = await mlClient.get("/users/me");
+  sellerId = String(meRes.data.id);
+  // Salva para próximas vezes
+  await prisma.token.update({
+    where: { id: validToken.id },
+    data: { 
+      mlUserId: sellerId,
+      mlNickname: meRes.data.nickname,
+    },
+  });
+}
+
+const mlRes = await mlClient.get("/orders/search", {
+  params: {
+    seller: sellerId,
+    sort: "date_desc",
+    limit,
+  },
+});
 
       const mlOrders = mlRes.data.results ?? [];
 
