@@ -32,25 +32,46 @@ export async function syncOrdersForUser(userId: number) {
         });
       }
 
-      // Paginação — busca todos os pedidos sem limite
+      // Paginação — busca todos os pedidos
       let offset = 0;
       const pageSize = 50;
       let hasMore = true;
 
       while (hasMore) {
         const mlRes = await mlClient.get("/orders/search", {
-          params: {
-            seller: sellerId,
-            sort: "date_desc",
-            limit: pageSize,
-            offset,
-          },
+          params: { seller: sellerId, sort: "date_desc", limit: pageSize, offset },
         });
 
         const mlOrders = mlRes.data.results ?? [];
         const total = mlRes.data.paging?.total ?? 0;
 
         for (const mlOrder of mlOrders) {
+          // Custo do frete via endpoint separado
+          let shippingCost: number | null = null;
+          if (mlOrder.shipping?.id) {
+            try {
+              const shipRes = await mlClient.get(
+                `/shipments/${mlOrder.shipping.id}/costs`
+              );
+              shippingCost = shipRes.data?.shipping_fee
+                ?? shipRes.data?.cost
+                ?? null;
+            } catch {
+              shippingCost = null;
+            }
+          }
+
+          // Tarifa ML = soma dos sale_fee dos itens
+          const mlFee = (mlOrder.order_items ?? []).reduce(
+            (acc: number, item: any) => acc + (item.sale_fee ?? 0), 0
+          );
+
+          // Imposto NF
+          const taxesAmount = mlOrder.taxes?.amount ?? 0;
+
+          // Valor líquido recebido = total - tarifa - frete
+          const netReceived = mlOrder.total_amount - mlFee - (shippingCost ?? 0);
+
           const existing = await prisma.order.findUnique({
             where: { mlId: String(mlOrder.id) },
           });
@@ -58,7 +79,9 @@ export async function syncOrdersForUser(userId: number) {
           const orderData = {
             status: mlOrder.status,
             totalAmount: mlOrder.total_amount,
-            netReceived: mlOrder.payments?.[0]?.total_paid_amount ?? null,
+            netReceived,
+            taxesAmount,
+            shippingCost,
             dateCreated: new Date(mlOrder.date_created),
             userId,
             tokenId: token.id,
@@ -69,20 +92,22 @@ export async function syncOrdersForUser(userId: number) {
               data: { mlId: String(mlOrder.id), ...orderData },
             });
 
+            // Itens com sale_fee
             for (const item of mlOrder.order_items ?? []) {
               await prisma.item.create({
-  data: {
-    orderId: created.id,
-    mlItemId: String(item.item?.id ?? ""),
-    title: item.item?.title ?? "—",
-    quantity: item.quantity,
-    unitPrice: item.unit_price,
-    sku: item.item?.seller_sku ?? null,
-    saleFee: item.sale_fee ?? 0,
-  },
-});
+                data: {
+                  orderId: created.id,
+                  mlItemId: String(item.item?.id ?? ""),
+                  title: item.item?.title ?? "—",
+                  quantity: item.quantity,
+                  unitPrice: item.unit_price,
+                  sku: item.item?.seller_sku ?? null,
+                  saleFee: item.sale_fee ?? 0,
+                },
+              });
             }
 
+            // Pagamentos (estornos incluídos)
             for (const pay of mlOrder.payments ?? []) {
               await prisma.payment.create({
                 data: {
@@ -96,33 +121,21 @@ export async function syncOrdersForUser(userId: number) {
               });
             }
 
-if (mlOrder.shipping?.id) {
-  // Busca o custo real do frete
-  let shippingCost: number | null = null;
-  try {
-    const shipRes = await mlClient.get(
-      `/shipments/${mlOrder.shipping.id}/costs`
-    );
-    shippingCost = shipRes.data?.shipping_fee ?? 
-                   shipRes.data?.cost ?? 
-                   null;
-  } catch {
-    shippingCost = null;
-  }
-
-  await prisma.shipment.upsert({
-    where: { orderId: created.id },
-    create: {
-      orderId: created.id,
-      mlShipmentId: String(mlOrder.shipping.id),
-      status: mlOrder.shipping.status ?? "pending",
-      trackingNumber: mlOrder.shipping.tracking_number ?? null,
-      cost: shippingCost,
-      dateCreated: new Date(mlOrder.date_created),
-    },
-    update: { cost: shippingCost },
-  });
-}
+            // Envio com custo real
+            if (mlOrder.shipping?.id) {
+              await prisma.shipment.upsert({
+                where: { orderId: created.id },
+                create: {
+                  orderId: created.id,
+                  mlShipmentId: String(mlOrder.shipping.id),
+                  status: mlOrder.shipping.status ?? "pending",
+                  trackingNumber: mlOrder.shipping.tracking_number ?? null,
+                  cost: shippingCost,
+                  dateCreated: new Date(mlOrder.date_created),
+                },
+                update: { cost: shippingCost },
+              });
+            }
             ordersNew++;
           } else {
             await prisma.order.update({
@@ -145,10 +158,7 @@ if (mlOrder.shipping?.id) {
 
     const durationMs = Date.now() - start;
     await prisma.syncLog.create({
-      data: {
-        userId, tokenId: token.id, status,
-        ordersNew, ordersUpdated, errorMessage, durationMs,
-      },
+      data: { userId, tokenId: token.id, status, ordersNew, ordersUpdated, errorMessage, durationMs },
     });
     results.push({ tokenId: token.id, status, ordersNew, ordersUpdated, errorMessage });
   }
@@ -159,20 +169,15 @@ if (mlOrder.shipping?.id) {
 
 // GET /orders/sync
 router.get("/", requireAuth, requireFuncionarioPermission("sync_ml"), async (req, res) => {
-  const user = req.user;
-  const liderId = await getLiderId(user);
+  const liderId = await getLiderId(req.user);
   const results = await syncOrdersForUser(liderId);
   return res.json({ ok: true, results });
 });
 
 // GET /sync/status
 router.get("/status", requireAuth, async (req, res) => {
-  const user = req.user;
-  const liderId = await getLiderId(user);
-  const lider = await prisma.user.findUnique({
-    where: { id: liderId },
-    select: { lastSyncAt: true },
-  });
+  const liderId = await getLiderId(req.user);
+  const lider = await prisma.user.findUnique({ where: { id: liderId }, select: { lastSyncAt: true } });
   return res.json({ lastSyncAt: lider?.lastSyncAt });
 });
 
@@ -208,10 +213,7 @@ router.get("/preview", requireAuth, async (req, res) => {
     else unchangedCount++;
   }
 
-  return res.json({
-    new: newCount, updated: updatedCount,
-    unchanged: unchangedCount, orders: mlOrders.slice(0, 5),
-  });
+  return res.json({ new: newCount, updated: updatedCount, unchanged: unchangedCount, orders: mlOrders.slice(0, 5) });
 });
 
 export default router;

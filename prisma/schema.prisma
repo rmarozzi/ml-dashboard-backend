@@ -113,6 +113,8 @@ model Order {
   status      String
   totalAmount Float
   netReceived Float?
+  taxesAmount   Float    @default(0)   
+  shippingCost  Float?                
   dateCreated DateTime
   userId      Int
   tokenId     Int

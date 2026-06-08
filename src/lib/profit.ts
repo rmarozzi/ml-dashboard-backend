@@ -4,24 +4,32 @@ export async function calculateOrderProfit(orderId: number) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: { items: true, payments: true, shipment: true },
-  });
+  }) as any;
   if (!order) return null;
 
-  // Receita bruta = valor total do pedido
+  // ── Receita Bruta ─────────────────────────────────────────────
   const grossRevenue = order.totalAmount;
 
-  // Tarifa ML = soma dos sale_fee de cada item
-  const mlFee = order.items.reduce((acc, item) => acc + (item.saleFee ?? 0), 0);
+  // ── Tarifa ML = soma dos sale_fee dos itens ────────────────────
+  const mlFee = order.items.reduce(
+    (acc: number, item: any) => acc + (item.saleFee ?? 0), 0
+  );
 
-  // Frete cobrado do vendedor
-  const shippingCost = order.shipment?.cost ?? 0;
+  // ── Frete cobrado do vendedor ──────────────────────────────────
+  const shippingCost = order.shippingCost
+    ?? order.shipment?.cost
+    ?? 0;
 
-  // Estorno = payments com operationType diferente de regular_payment (ex: reembolso parcial do ML)
+  // ── Imposto NF (taxes.amount do ML) ───────────────────────────
+  const mlTax = order.taxesAmount ?? 0;
+
+  // ── Estorno = pagamentos que não são regular_payment ──────────
+  // Ex: seller_recharge, buyer_insurance, etc.
   const estorno = order.payments
-    .filter(p => p.operationType !== "regular_payment")
-    .reduce((acc, p) => acc + p.totalPaidAmount, 0);
+    .filter((p: any) => p.operationType !== "regular_payment")
+    .reduce((acc: number, p: any) => acc + (p.totalPaidAmount ?? 0), 0);
 
-  // Custo do produto + imposto NF
+  // ── Custo do Produto + Imposto NF do vendedor ──────────────────
   let productCostTotal = 0;
   let nfTaxTotal = 0;
   let allCostsFound = true;
@@ -40,21 +48,20 @@ export async function calculateOrderProfit(orderId: number) {
 
     if (!cost) { allCostsFound = false; continue; }
 
-    const itemCost = cost.cost * item.quantity;
-    const itemTax = itemCost * (cost.taxRate / 100);
-    productCostTotal += itemCost;
-    nfTaxTotal += itemTax;
+    productCostTotal += cost.cost * item.quantity;
+    nfTaxTotal += (cost.cost * item.quantity) * (cost.taxRate / 100);
   }
 
-  // Fórmula final:
+  // ── Fórmula final ──────────────────────────────────────────────
   // Lucro = Receita Bruta - Tarifa ML - Frete - Custo Produto - Imposto NF + Estorno
-  const profit = grossRevenue - mlFee - shippingCost - productCostTotal - nfTaxTotal + estorno;
+  const profit = grossRevenue - mlFee - shippingCost - mlTax - productCostTotal - nfTaxTotal + estorno;
   const margin = grossRevenue > 0 ? (profit / grossRevenue) * 100 : 0;
 
   return {
     grossRevenue,
     mlFee,
     shippingCost,
+    mlTax,
     estorno,
     productCost: productCostTotal,
     nfTax: nfTaxTotal,
