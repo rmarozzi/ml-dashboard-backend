@@ -96,20 +96,33 @@ export async function syncOrdersForUser(userId: number) {
               });
             }
 
-            if (mlOrder.shipping?.id) {
-              await prisma.shipment.upsert({
-                where: { orderId: created.id },
-                create: {
-                  orderId: created.id,
-                  mlShipmentId: String(mlOrder.shipping.id),
-                  status: mlOrder.shipping.status ?? "pending",
-                  trackingNumber: mlOrder.shipping.tracking_number ?? null,
-                  cost: mlOrder.shipping.cost ?? null,
-                  dateCreated: new Date(mlOrder.date_created),
-                },
-                update: {},
-              });
-            }
+if (mlOrder.shipping?.id) {
+  // Busca o custo real do frete
+  let shippingCost: number | null = null;
+  try {
+    const shipRes = await mlClient.get(
+      `/shipments/${mlOrder.shipping.id}/costs`
+    );
+    shippingCost = shipRes.data?.shipping_fee ?? 
+                   shipRes.data?.cost ?? 
+                   null;
+  } catch {
+    shippingCost = null;
+  }
+
+  await prisma.shipment.upsert({
+    where: { orderId: created.id },
+    create: {
+      orderId: created.id,
+      mlShipmentId: String(mlOrder.shipping.id),
+      status: mlOrder.shipping.status ?? "pending",
+      trackingNumber: mlOrder.shipping.tracking_number ?? null,
+      cost: shippingCost,
+      dateCreated: new Date(mlOrder.date_created),
+    },
+    update: { cost: shippingCost },
+  });
+}
             ordersNew++;
           } else {
             await prisma.order.update({
