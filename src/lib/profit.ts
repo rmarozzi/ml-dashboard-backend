@@ -7,29 +7,26 @@ export async function calculateOrderProfit(orderId: number) {
   }) as any;
   if (!order) return null;
 
-  // ── Receita Bruta ─────────────────────────────────────────────
+  // Receita Bruta
   const grossRevenue = order.totalAmount;
 
-  // ── Tarifa ML = soma dos sale_fee dos itens ────────────────────
+  // Tarifa ML = soma dos sale_fee dos itens
   const mlFee = order.items.reduce(
     (acc: number, item: any) => acc + (item.saleFee ?? 0), 0
   );
 
-  // ── Frete cobrado do vendedor ──────────────────────────────────
-  const shippingCost = order.shippingCost
-    ?? order.shipment?.cost
-    ?? 0;
+  // Frete cobrado do vendedor
+  const shippingCost = order.shippingCost ?? order.shipment?.cost ?? 0;
 
-  // ── Imposto NF (taxes.amount do ML) ───────────────────────────
-  const mlTax = order.taxesAmount ?? 0;
+  // Imposto ML (taxes.amount) — só considerado se > 0
+  const mlTax = order.taxesAmount > 0 ? order.taxesAmount : 0;
 
-  // ── Estorno = pagamentos que não são regular_payment ──────────
-  // Ex: seller_recharge, buyer_insurance, etc.
+  // Estorno = pagamentos que não são regular_payment (bônus/reembolso do ML)
   const estorno = order.payments
     .filter((p: any) => p.operationType !== "regular_payment")
     .reduce((acc: number, p: any) => acc + (p.totalPaidAmount ?? 0), 0);
 
-  // ── Custo do Produto + Imposto NF do vendedor ──────────────────
+  // Custo do Produto + Imposto NF calculado sobre receita bruta por produto
   let productCostTotal = 0;
   let nfTaxTotal = 0;
   let allCostsFound = true;
@@ -48,23 +45,27 @@ export async function calculateOrderProfit(orderId: number) {
 
     if (!cost) { allCostsFound = false; continue; }
 
+    // Custo do produto
     productCostTotal += cost.cost * item.quantity;
-    nfTaxTotal += (cost.cost * item.quantity) * (cost.taxRate / 100);
+
+    // Imposto NF = alíquota cadastrada × receita bruta proporcional do item
+    const itemRevenue = item.unitPrice * item.quantity;
+    nfTaxTotal += itemRevenue * (cost.taxRate / 100);
   }
 
-  // ── Fórmula final ──────────────────────────────────────────────
-  // Lucro = Receita Bruta - Tarifa ML - Frete - Custo Produto - Imposto NF + Estorno
-  const profit = grossRevenue - mlFee - shippingCost - mlTax - productCostTotal - nfTaxTotal + estorno;
+  // Fórmula final:
+  // Lucro = Receita Bruta - Tarifa ML - Frete - Imposto NF - Custo Produto - Imposto ML + Estorno
+  const profit = grossRevenue - mlFee - shippingCost - nfTaxTotal - productCostTotal - mlTax + estorno;
   const margin = grossRevenue > 0 ? (profit / grossRevenue) * 100 : 0;
 
   return {
     grossRevenue,
     mlFee,
     shippingCost,
-    mlTax,
+    mlTax,          // só > 0 quando o ML retiver algo
     estorno,
     productCost: productCostTotal,
-    nfTax: nfTaxTotal,
+    nfTax: nfTaxTotal,  // calculado sobre receita bruta × alíquota do SKU
     profit,
     margin: parseFloat(margin.toFixed(2)),
     allCostsFound,
