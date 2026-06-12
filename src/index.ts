@@ -17,6 +17,7 @@ import subscriptionRouter from "./routes/subscription";
 import exportRouter from "./routes/export";
 import adminRouter from "./routes/admin";
 import { runAlertJob } from "./jobs/alerts";
+import { runTokenRefreshJob } from "./lib/ml";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -76,8 +77,13 @@ app.listen(PORT, () => {
 
 // ─── ALERT CRON (every hour) ──────────────────────────────────────────────────
 if (process.env.NODE_ENV === "production") {
+  // Alertas — roda a cada hora
   setInterval(runAlertJob, 60 * 60 * 1000);
-  setTimeout(runAlertJob, 5000); // run once shortly after boot
+  setTimeout(runAlertJob, 5000);
+
+  // Renovação de tokens ML — roda a cada 5 horas
+  setInterval(runTokenRefreshJob, 5 * 60 * 60 * 1000);
+  setTimeout(runTokenRefreshJob, 10000); // roda 10s após o boot
 }
 
 export default app;

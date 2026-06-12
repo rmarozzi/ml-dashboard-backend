@@ -33,6 +33,7 @@ export async function refreshToken(tokenId: number) {
       expiresAt,
     },
   });
+  console.log(`[ML] Token #${tokenId} renovado. Expira em: ${expiresAt.toISOString()}`);
   return updated;
 }
 
@@ -40,12 +41,44 @@ export async function getValidToken(tokenId: number) {
   let tokenRecord = await prisma.token.findUnique({ where: { id: tokenId } });
   if (!tokenRecord) throw new Error("Token not found");
 
-  // Refresh if expires within 10 minutes
+  // Renova se expira em menos de 1 hora
   const expiresInMs = tokenRecord.expiresAt.getTime() - Date.now();
-  if (expiresInMs < 10 * 60 * 1000) {
+  if (expiresInMs < 60 * 60 * 1000) {
     tokenRecord = await refreshToken(tokenId);
   }
   return tokenRecord;
+}
+
+// Job de renovação automática — roda a cada 5 horas
+// Renova todos os tokens que expiram nas próximas 2 horas
+export async function runTokenRefreshJob() {
+  console.log("[TokenRefreshJob] Verificando tokens...");
+  const in2Hours = new Date(Date.now() + 2 * 60 * 60 * 1000);
+
+  const tokens = await prisma.token.findMany({
+    where: { expiresAt: { lte: in2Hours } },
+  });
+
+  console.log(`[TokenRefreshJob] ${tokens.length} token(s) para renovar`);
+
+  for (const token of tokens) {
+    try {
+      await refreshToken(token.id);
+    } catch (err: any) {
+      console.error(`[TokenRefreshJob] Falha ao renovar token #${token.id}:`, err?.message);
+      // Cria alerta para o admin
+      await prisma.adminAlert.create({
+        data: {
+          type: "token_refresh_failed",
+          severity: "critical",
+          clientId: token.userId,
+          tokenId: token.id,
+          description: `Falha ao renovar token da conta '${token.apelido ?? token.mlNickname ?? `#${token.id}`}'. Reconexão necessária.`,
+        },
+      }).catch(() => {});
+    }
+  }
+  console.log("[TokenRefreshJob] Concluído");
 }
 
 export function buildOAuthUrl(state: string): string {
