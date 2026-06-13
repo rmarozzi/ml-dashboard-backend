@@ -44,7 +44,7 @@ const ordersWithProfit = await Promise.all(
         mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
         shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
         mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
-        nfTax: p ? Math.round(p.nfTaxTotal * 100) / 100 : null,
+        nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
         productCost: p ? Math.round(p.productCost * 100) / 100 : null,
         estorno: p ? Math.round(p.estorno * 100) / 100 : null,
         allCostsFound: p ? p.allCostsFound : false,
