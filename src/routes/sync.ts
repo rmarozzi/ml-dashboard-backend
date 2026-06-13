@@ -51,11 +51,11 @@ export async function syncOrdersForUser(userId: number) {
           if (mlOrder.shipping?.id) {
             try {
               const shipRes = await mlClient.get(
-                `/shipments/${mlOrder.shipping.id}/costs`
-              );
-              shippingCost = shipRes.data?.shipping_fee
-                ?? shipRes.data?.cost
-                ?? null;
+  `/shipments/${mlOrder.shipping.id}/costs`
+);
+// O custo do frete do vendedor fica em senders[0].cost
+const senders = shipRes.data?.senders ?? [];
+shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
             } catch {
               shippingCost = null;
             }
