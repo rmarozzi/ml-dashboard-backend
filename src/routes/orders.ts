@@ -33,15 +33,22 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
     prisma.order.count({ where }),
   ]);
 
-  const ordersWithProfit = await Promise.all(
+const ordersWithProfit = await Promise.all(
     orders.map(async (order) => {
-      let profit = null, margin = null;
-      if (canViewProfit) {
-        const p = await calculateOrderProfit(order.id);
-        profit = p ? Math.round(p.profit * 100) / 100 : null;
-        margin = p ? p.margin : null;
-      }
-      return { ...order, profit, margin };
+      if (!canViewProfit) return { ...order, profit: null, margin: null };
+      const p = await calculateOrderProfit(order.id);
+      return {
+        ...order,
+        profit: p ? Math.round(p.profit * 100) / 100 : null,
+        margin: p ? p.margin : null,
+        mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
+        shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
+        mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
+        nfTax: p ? Math.round(p.nfTaxTotal * 100) / 100 : null,
+        productCost: p ? Math.round(p.productCost * 100) / 100 : null,
+        estorno: p ? Math.round(p.estorno * 100) / 100 : null,
+        allCostsFound: p ? p.allCostsFound : false,
+      };
     })
   );
 
