@@ -11,9 +11,10 @@ export async function calculateOrderProfit(orderId: number) {
   const grossRevenue = order.totalAmount;
 
   // Tarifa ML = soma dos sale_fee dos itens
-  const mlFee = order.items.reduce(
-    (acc: number, item: any) => acc + (item.saleFee ?? 0), 0
-  );
+  // sale_fee vem por unidade — multiplica pela quantidade
+const mlFee = order.items.reduce(
+  (acc: number, item: any) => acc + ((item.saleFee ?? 0) * item.quantity), 0
+);
 
   // Frete cobrado do vendedor
   const shippingCost = order.shippingCost ?? order.shipment?.cost ?? 0;

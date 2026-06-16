@@ -34,24 +34,24 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
   ]);
 
 const ordersWithProfit = await Promise.all(
-    orders.map(async (order) => {
-      if (!canViewProfit) return { ...order, profit: null, margin: null };
-      const p = await calculateOrderProfit(order.id);
-      return {
-        ...order,
-        profit: p ? Math.round(p.profit * 100) / 100 : null,
-        margin: p ? p.margin : null,
-        mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
-        shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
-        mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
-        nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
-        productCost: p ? Math.round(p.productCost * 100) / 100 : null,
-        estorno: p ? Math.round(p.estorno * 100) / 100 : null,
-        allCostsFound: p ? p.allCostsFound : false,
-      };
-    })
-  );
-
+  orders.map(async (order) => {
+    if (!canViewProfit) return { ...order, profit: null, margin: null };
+    const p = await calculateOrderProfit(order.id);
+    return {
+      ...order,
+      profit: p ? Math.round(p.profit * 100) / 100 : null,
+      margin: p ? p.margin : null,
+      mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
+      shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
+      mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
+      nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
+      productCost: p ? Math.round(p.productCost * 100) / 100 : null,
+      estorno: p ? Math.round(p.estorno * 100) / 100 : null,
+      allCostsFound: p ? p.allCostsFound : false,
+      missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
+    };
+  })
+);
   return res.json({ orders: ordersWithProfit, total, page: parseInt(page), limit: parseInt(limit) });
 });
 
