@@ -118,6 +118,7 @@ model Order {
   dateCreated DateTime
   userId      Int
   tokenId     Int
+  shippingDiscount Float @default(0)  // estorno/desconto de frete do ML
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   token    Token     @relation(fields: [tokenId], references: [id])

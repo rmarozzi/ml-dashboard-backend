@@ -48,6 +48,7 @@ export async function syncOrdersForUser(userId: number) {
         for (const mlOrder of mlOrders) {
           // Custo do frete via endpoint separado
           let shippingCost: number | null = null;
+	let shippingDiscount = 0;
           if (mlOrder.shipping?.id) {
             try {
               const shipRes = await mlClient.get(
@@ -55,7 +56,10 @@ export async function syncOrdersForUser(userId: number) {
 );
 // O custo do frete do vendedor fica em senders[0].cost
 const senders = shipRes.data?.senders ?? [];
+const receiver = shipRes.data?.receiver ?? {};
 shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
+// Estorno = desconto que o ML deu no frete (aparece como bônus para o vendedor)
+shippingDiscount = receiver.save ?? 0;
             } catch {
               shippingCost = null;
             }
@@ -84,6 +88,7 @@ shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
             shippingCost,
             dateCreated: new Date(mlOrder.date_created),
             userId,
+	    shippingDiscount,
             tokenId: token.id,
           };
 
