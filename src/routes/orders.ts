@@ -8,7 +8,12 @@ const router = Router();
 
 // GET /orders
 router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async (req, res) => {
-  const { search, status, page = "1", limit = "50" } = req.query as Record<string, string>;
+  const {
+    search, status, page = "1", limit = "50",
+    sortField = "dateCreated", sortDir = "desc",
+    onlyMissingCost,
+  } = req.query as Record<string, string>;
+
   const tokenIds = await filterMlAccounts(req.user);
   const canViewProfit = req.user.role === "admin" || req.user.subscription?.plan?.canViewProfit;
 
@@ -21,38 +26,87 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
     ];
   }
 
-  const skip = (parseInt(page) - 1) * parseInt(limit);
-  const [orders, total] = await Promise.all([
-    prisma.order.findMany({
-      where,
-      include: { items: true, payments: true, token: { select: { apelido: true, mlNickname: true } } },
-      orderBy: { dateCreated: "desc" },
-      skip,
-      take: parseInt(limit),
-    }),
-    prisma.order.count({ where }),
-  ]);
+  const pageNum = parseInt(page);
+  const limitNum = Math.min(parseInt(limit) || 50, 200); // cap máximo de 200
+  const skip = (pageNum - 1) * limitNum;
 
-const ordersWithProfit = await Promise.all(
-  orders.map(async (order) => {
-    if (!canViewProfit) return { ...order, profit: null, margin: null };
-    const p = await calculateOrderProfit(order.id);
-    return {
-      ...order,
-      profit: p ? Math.round(p.profit * 100) / 100 : null,
-      margin: p ? p.margin : null,
-      mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
-      shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
-      mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
-      nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
-      productCost: p ? Math.round(p.productCost * 100) / 100 : null,
-      estorno: p ? Math.round(p.estorno * 100) / 100 : null,
-      allCostsFound: p ? p.allCostsFound : false,
-      missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
-    };
-  })
-);
-  return res.json({ orders: ordersWithProfit, total, page: parseInt(page), limit: parseInt(limit) });
+  // Ordenação válida apenas para campos do banco (profit/margin calculados depois)
+  const dbSortFields = ["mlId", "totalAmount", "dateCreated", "status"];
+  const orderBy: any = dbSortFields.includes(sortField)
+    ? { [sortField]: sortDir === "asc" ? "asc" : "desc" }
+    : { dateCreated: "desc" };
+
+  // Busca TODOS os ids que batem no filtro (sem include pesado) para contar total
+  const allMatching = await prisma.order.findMany({
+    where,
+    select: { id: true },
+  });
+  const total = allMatching.length;
+
+  // Busca a página atual com os relacionamentos completos
+  const orders = await prisma.order.findMany({
+    where,
+    include: {
+      items: true,
+      payments: true,
+      token: { select: { apelido: true, mlNickname: true } },
+    },
+    orderBy,
+    skip,
+    take: limitNum,
+  });
+
+  const ordersWithProfit = await Promise.all(
+    orders.map(async (order) => {
+      if (!canViewProfit) {
+        return {
+          ...order,
+          profit: null, margin: null,
+          missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
+        };
+      }
+      const p = await calculateOrderProfit(order.id);
+      return {
+        ...order,
+        profit: p ? Math.round(p.profit * 100) / 100 : null,
+        margin: p ? p.margin : null,
+        mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
+        shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
+        mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
+        nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
+        productCost: p ? Math.round(p.productCost * 100) / 100 : null,
+        estorno: p ? Math.round(p.estorno * 100) / 100 : null,
+        allCostsFound: p ? p.allCostsFound : false,
+        missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
+      };
+    })
+  );
+
+  // Filtro "sem custo" aplicado após o cálculo (só nesta página)
+  const finalOrders = onlyMissingCost === "true"
+    ? ordersWithProfit.filter((o: any) => !o.allCostsFound)
+    : ordersWithProfit;
+
+  // Conta quantos pedidos no total (todas as páginas) estão sem custo
+  // Isso é custoso, então fazemos uma query separada e mais leve
+  let missingCostTotal = 0;
+  if (canViewProfit) {
+    const itemsNoSku = await prisma.item.findMany({
+      where: { order: { tokenId: { in: tokenIds } }, sku: null },
+      select: { orderId: true },
+      distinct: ["orderId"],
+    });
+    missingCostTotal = itemsNoSku.length;
+  }
+
+  return res.json({
+    orders: finalOrders,
+    total,
+    page: pageNum,
+    limit: limitNum,
+    totalPages: Math.ceil(total / limitNum),
+    missingCostTotal,
+  });
 });
 
 // GET /profit/orders
