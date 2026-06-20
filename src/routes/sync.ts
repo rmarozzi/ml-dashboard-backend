@@ -48,22 +48,31 @@ export async function syncOrdersForUser(userId: number) {
         for (const mlOrder of mlOrders) {
           // Custo do frete via endpoint separado
           let shippingCost: number | null = null;
-	let shippingDiscount = 0;
-          if (mlOrder.shipping?.id) {
-            try {
-              const shipRes = await mlClient.get(
-  `/shipments/${mlOrder.shipping.id}/costs`
-);
-// O custo do frete do vendedor fica em senders[0].cost
-const senders = shipRes.data?.senders ?? [];
-const receiver = shipRes.data?.receiver ?? {};
-shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
-// Estorno = desconto que o ML deu no frete (aparece como bônus para o vendedor)
-shippingDiscount = receiver.save ?? 0;
-            } catch {
-              shippingCost = null;
-            }
-          }
+let shippingDiscount = 0;
+let shippingStatus = "pending";
+let trackingNumber: string | null = null;
+
+if (mlOrder.shipping?.id) {
+  // Busca status real e número de rastreio
+  try {
+    const shipDetailRes = await mlClient.get(`/shipments/${mlOrder.shipping.id}`);
+    shippingStatus = shipDetailRes.data?.status ?? "pending";
+    trackingNumber = shipDetailRes.data?.tracking_number ?? null;
+  } catch {
+    shippingStatus = mlOrder.shipping.status ?? "pending";
+  }
+
+  // Busca custo do frete e desconto/estorno
+  try {
+    const shipCostsRes = await mlClient.get(`/shipments/${mlOrder.shipping.id}/costs`);
+    const senders = shipCostsRes.data?.senders ?? [];
+    const receiver = shipCostsRes.data?.receiver ?? {};
+    shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
+    shippingDiscount = receiver.save ?? 0;
+  } catch {
+    shippingCost = null;
+  }
+}
 
           // Tarifa ML = soma dos sale_fee dos itens
           const mlFee = (mlOrder.order_items ?? []).reduce(
@@ -126,19 +135,23 @@ shippingDiscount = receiver.save ?? 0;
               });
             }
 
-            // Envio com custo real
+// Envio com status real e custo
             if (mlOrder.shipping?.id) {
               await prisma.shipment.upsert({
                 where: { orderId: created.id },
                 create: {
                   orderId: created.id,
                   mlShipmentId: String(mlOrder.shipping.id),
-                  status: mlOrder.shipping.status ?? "pending",
-                  trackingNumber: mlOrder.shipping.tracking_number ?? null,
+                  status: shippingStatus,
+                  trackingNumber: trackingNumber,
                   cost: shippingCost,
                   dateCreated: new Date(mlOrder.date_created),
                 },
-                update: { cost: shippingCost },
+                update: {
+                  status: shippingStatus,
+                  trackingNumber: trackingNumber,
+                  cost: shippingCost,
+                },
               });
             }
             ordersNew++;
