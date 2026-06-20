@@ -27,23 +27,88 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
   }
 
   const pageNum = parseInt(page);
-  const limitNum = Math.min(parseInt(limit) || 50, 200); // cap máximo de 200
+  const limitNum = Math.min(parseInt(limit) || 50, 200);
   const skip = (pageNum - 1) * limitNum;
 
-  // Ordenação válida apenas para campos do banco (profit/margin calculados depois)
   const dbSortFields = ["mlId", "totalAmount", "dateCreated", "status"];
   const orderBy: any = dbSortFields.includes(sortField)
     ? { [sortField]: sortDir === "asc" ? "asc" : "desc" }
     : { dateCreated: "desc" };
 
-  // Busca TODOS os ids que batem no filtro (sem include pesado) para contar total
-  const allMatching = await prisma.order.findMany({
-    where,
-    select: { id: true },
-  });
-  const total = allMatching.length;
+  // ── Filtro "sem custo cadastrado" aplicado ANTES da paginação ──────────────
+  if (onlyMissingCost === "true" && canViewProfit) {
+    // Busca todos os IDs de pedidos que batem no filtro base (status/search/tokenIds)
+    const candidateOrders = await prisma.order.findMany({
+      where,
+      select: { id: true, dateCreated: true, items: { select: { sku: true } } },
+    });
 
-  // Busca a página atual com os relacionamentos completos
+    // Pega todos os SKUs únicos do usuário que JÁ têm custo cadastrado
+    const liderIdForCosts = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
+    const registeredCosts = await prisma.productCost.findMany({
+      where: { userId: liderIdForCosts },
+      select: { sku: true },
+      distinct: ["sku"],
+    });
+    const registeredSkuSet = new Set(registeredCosts.map((c) => c.sku));
+
+    // Um pedido está "sem custo" se algum item não tem SKU OU o SKU não está cadastrado
+    const missingCostOrderIds = candidateOrders
+      .filter((o) =>
+        o.items.some((i) => !i.sku || !registeredSkuSet.has(i.sku))
+      )
+      .map((o) => o.id);
+
+    const missingCostTotal = missingCostOrderIds.length;
+
+    // Pagina apenas dentro do conjunto de pedidos sem custo
+    where.id = { in: missingCostOrderIds };
+
+    const total = missingCostTotal;
+    const orders = await prisma.order.findMany({
+      where,
+      include: {
+        items: true,
+        payments: true,
+        token: { select: { apelido: true, mlNickname: true } },
+      },
+      orderBy,
+      skip,
+      take: limitNum,
+    });
+
+    const ordersWithProfit = await Promise.all(
+      orders.map(async (order) => {
+        const p = await calculateOrderProfit(order.id);
+        return {
+          ...order,
+          profit: p ? Math.round(p.profit * 100) / 100 : null,
+          margin: p ? p.margin : null,
+          mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
+          shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
+          mlTax: p ? Math.round(p.mlTax * 100) / 100 : null,
+          nfTax: p ? Math.round(p.nfTax * 100) / 100 : null,
+          productCost: p ? Math.round(p.productCost * 100) / 100 : null,
+          estorno: p ? Math.round(p.estorno * 100) / 100 : null,
+          allCostsFound: p ? p.allCostsFound : false,
+          missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
+        };
+      })
+    );
+
+    return res.json({
+      orders: ordersWithProfit,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
+      missingCostTotal,
+    });
+  }
+
+  // ── Fluxo normal (sem filtro de custo) ──────────────────────────────────────
+  const total = await prisma.order.count({ where });
+
   const orders = await prisma.order.findMany({
     where,
     include: {
@@ -62,7 +127,7 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
         return {
           ...order,
           profit: null, margin: null,
-          missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
+          missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
         };
       }
       const p = await calculateOrderProfit(order.id);
@@ -77,30 +142,32 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
         productCost: p ? Math.round(p.productCost * 100) / 100 : null,
         estorno: p ? Math.round(p.estorno * 100) / 100 : null,
         allCostsFound: p ? p.allCostsFound : false,
-        missingSkus: order.items.filter(i => !i.sku).map(i => i.title),
+        missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
       };
     })
   );
 
-  // Filtro "sem custo" aplicado após o cálculo (só nesta página)
-  const finalOrders = onlyMissingCost === "true"
-    ? ordersWithProfit.filter((o: any) => !o.allCostsFound)
-    : ordersWithProfit;
-
-  // Conta quantos pedidos no total (todas as páginas) estão sem custo
-  // Isso é custoso, então fazemos uma query separada e mais leve
+  // Calcula o total geral de pedidos sem custo (para o badge do botão, sem filtro ativo)
   let missingCostTotal = 0;
   if (canViewProfit) {
-    const itemsNoSku = await prisma.item.findMany({
-      where: { order: { tokenId: { in: tokenIds } }, sku: null },
-      select: { orderId: true },
-      distinct: ["orderId"],
+    const liderIdForCosts = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
+    const allOrdersBase = await prisma.order.findMany({
+      where: { tokenId: { in: tokenIds } },
+      select: { id: true, items: { select: { sku: true } } },
     });
-    missingCostTotal = itemsNoSku.length;
+    const registeredCosts = await prisma.productCost.findMany({
+      where: { userId: liderIdForCosts },
+      select: { sku: true },
+      distinct: ["sku"],
+    });
+    const registeredSkuSet = new Set(registeredCosts.map((c) => c.sku));
+    missingCostTotal = allOrdersBase.filter((o) =>
+      o.items.some((i) => !i.sku || !registeredSkuSet.has(i.sku))
+    ).length;
   }
 
   return res.json({
-    orders: finalOrders,
+    orders: ordersWithProfit,
     total,
     page: pageNum,
     limit: limitNum,
