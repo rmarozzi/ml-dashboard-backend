@@ -148,6 +148,7 @@ model Payment {
   totalPaidAmount Float
   taxesAmount     Float  @default(0)
   operationType   String @default("regular_payment")
+  paymentMethodId String?
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }

@@ -123,17 +123,18 @@ if (mlOrder.shipping?.id) {
 
             // Pagamentos (estornos incluídos)
             for (const pay of mlOrder.payments ?? []) {
-              await prisma.payment.create({
-                data: {
-                  orderId: created.id,
-                  mlPaymentId: String(pay.id),
-                  status: pay.status,
-                  totalPaidAmount: pay.total_paid_amount ?? 0,
-                  taxesAmount: pay.taxes_amount ?? 0,
-                  operationType: pay.operation_type ?? "regular_payment",
-                },
-              });
-            }
+  await prisma.payment.create({
+    data: {
+      orderId: created.id,
+      mlPaymentId: String(pay.id),
+      status: pay.status,
+      totalPaidAmount: pay.total_paid_amount ?? 0,
+      taxesAmount: pay.taxes_amount ?? 0,
+      operationType: pay.operation_type ?? "regular_payment",
+      paymentMethodId: pay.payment_method_id ?? null,
+    },
+  });
+}
 
 // Envio com status real e custo
             if (mlOrder.shipping?.id) {
