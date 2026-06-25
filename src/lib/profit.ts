@@ -22,15 +22,11 @@ const mlFee = order.items.reduce(
   // Imposto ML (taxes.amount) — só considerado se > 0
   const mlTax = order.taxesAmount > 0 ? order.taxesAmount : 0;
 
-// Estorno de payments (pagamentos extras do ML)
-const paymentEstorno = order.payments
+// Estorno = apenas pagamentos extras reais do ML (não inclui desconto de frete do comprador)
+// O shippingDiscount (receiver.save) é um benefício ao COMPRADOR, não ao vendedor — não soma no lucro
+const estorno = order.payments
   .filter((p: any) => p.operationType !== "regular_payment")
   .reduce((acc: number, p: any) => acc + (p.totalPaidAmount ?? 0), 0);
-
-// Estorno de frete (desconto que o ML deu no envio)
-const shippingDiscount = (order as any).shippingDiscount ?? 0;
-
-const estorno = paymentEstorno + shippingDiscount;
 
   // Custo do Produto + Imposto NF calculado sobre receita bruta por produto
   let productCostTotal = 0;

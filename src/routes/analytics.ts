@@ -86,10 +86,10 @@ router.get("/", requireAuth, requirePlan("ouro"), requireFuncionarioPermission("
     );
     const shippingCost = order.shippingCost ?? 0;
     const mlTax = order.taxesAmount > 0 ? order.taxesAmount : 0;
-    const paymentEstorno = order.payments
-      .filter((p) => p.operationType !== "regular_payment")
-      .reduce((acc, p) => acc + (p.totalPaidAmount ?? 0), 0);
-    const estorno = paymentEstorno + (order.shippingDiscount ?? 0);
+    // Estorno = apenas pagamentos extras reais (shippingDiscount não beneficia o vendedor)
+const estorno = order.payments
+  .filter((p) => p.operationType !== "regular_payment")
+  .reduce((acc, p) => acc + (p.totalPaidAmount ?? 0), 0);
 
     let productCostTotal = 0;
     let nfTaxTotal = 0;
