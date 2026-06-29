@@ -174,14 +174,19 @@ model Shipment {
 }
 
 model ProductCost {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  sku       String
-  name      String
-  cost      Float
-  taxRate   Float    @default(0)
-  validFrom DateTime @default(now())
-  createdAt DateTime @default(now())
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  sku           String
+  name          String
+  cost          Float
+  taxRate       Float    @default(0)
+  validFrom     DateTime @default(now())
+  createdAt     DateTime @default(now())
+  ean           String?
+  ncm           String?
+  cest          String?
+  codFabricante String?
+  marca         String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
