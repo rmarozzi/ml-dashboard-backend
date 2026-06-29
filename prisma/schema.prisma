@@ -108,18 +108,23 @@ model Session {
 }
 
 model Order {
-  id          Int      @id @default(autoincrement())
-  mlId        String   @unique
-  packId        String?
-  status      String
-  totalAmount Float
-  netReceived Float?
-  taxesAmount   Float    @default(0)   
-  shippingCost  Float?                
-  dateCreated DateTime
-  userId      Int
-  tokenId     Int
-  shippingDiscount Float @default(0)  // estorno/desconto de frete do ML
+  id              Int      @id @default(autoincrement())
+  mlId            String   @unique
+  packId          String?
+  status          String
+  totalAmount     Float
+  netReceived     Float?
+  taxesAmount     Float    @default(0)
+  shippingCost    Float?
+  shippingDiscount Float   @default(0)
+  buyerName       String?
+  buyerDocType    String?
+  buyerDocNumber  String?
+  buyerCity       String?
+  buyerState      String?
+  dateCreated     DateTime
+  userId          Int
+  tokenId         Int
 
   user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   token    Token     @relation(fields: [tokenId], references: [id])

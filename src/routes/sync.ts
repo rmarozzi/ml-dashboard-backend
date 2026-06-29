@@ -82,6 +82,30 @@ if (mlOrder.shipping?.id) {
           // Imposto NF
           const taxesAmount = mlOrder.taxes?.amount ?? 0;
 
+// Busca dados do comprador (nome, documento, localização)
+let buyerName: string | null = null;
+let buyerDocType: string | null = null;
+let buyerDocNumber: string | null = null;
+let buyerCity: string | null = null;
+let buyerState: string | null = null;
+
+try {
+  const billingRes = await mlClient.get(`/orders/${mlOrder.id}/billing_info`);
+  const info = billingRes.data?.billing_info?.additional_info ?? [];
+  const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
+
+  const firstName = getField("FIRST_NAME");
+  const lastName = getField("LAST_NAME");
+  buyerName = [firstName, lastName].filter(Boolean).join(" ") || null;
+  buyerDocType = getField("DOC_TYPE");
+  buyerDocNumber = getField("DOC_NUMBER");
+  buyerCity = getField("CITY_NAME");
+  const stateCode = getField("STATE_CODE"); // ex: "BR-SP"
+  buyerState = stateCode ? stateCode.replace("BR-", "") : null;
+} catch {
+  // Billing info pode não estar disponível para todos os pedidos
+}
+
           // Valor líquido recebido = total - tarifa - frete
           const netReceived = mlOrder.total_amount - mlFee - (shippingCost ?? 0);
 
@@ -99,6 +123,11 @@ const orderData = {
   userId,
   shippingDiscount,
   packId: mlOrder.pack_id ? String(mlOrder.pack_id) : null,
+  buyerName,
+  buyerDocType,
+  buyerDocNumber,
+  buyerCity,
+  buyerState,
   tokenId: token.id,
 };
 
