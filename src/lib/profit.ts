@@ -1,5 +1,13 @@
 import prisma from "./prisma";
 
+async function getEffectiveTaxRate(userId: number, date: Date): Promise<number> {
+  const setting = await prisma.taxSetting.findFirst({
+    where: { userId, validFrom: { lte: date } },
+    orderBy: { validFrom: "desc" },
+  });
+  return setting?.rate ?? 0;
+}
+
 export async function calculateOrderProfit(orderId: number) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -7,30 +15,26 @@ export async function calculateOrderProfit(orderId: number) {
   }) as any;
   if (!order) return null;
 
-  // Receita Bruta
   const grossRevenue = order.totalAmount;
 
-  // Tarifa ML = soma dos sale_fee dos itens
-  // sale_fee vem por unidade — multiplica pela quantidade
-const mlFee = order.items.reduce(
-  (acc: number, item: any) => acc + ((item.saleFee ?? 0) * item.quantity), 0
-);
+  const mlFee = order.items.reduce(
+    (acc: number, item: any) => acc + (item.saleFee ?? 0) * item.quantity, 0
+  );
 
-  // Frete cobrado do vendedor
   const shippingCost = order.shippingCost ?? order.shipment?.cost ?? 0;
-
-  // Imposto ML (taxes.amount) — só considerado se > 0
   const mlTax = order.taxesAmount > 0 ? order.taxesAmount : 0;
 
-// Estorno = apenas pagamentos extras reais do ML (não inclui desconto de frete do comprador)
-// O shippingDiscount (receiver.save) é um benefício ao COMPRADOR, não ao vendedor — não soma no lucro
-const estorno = order.payments
-  .filter((p: any) => p.operationType !== "regular_payment")
-  .reduce((acc: number, p: any) => acc + (p.totalPaidAmount ?? 0), 0);
+  // Estorno = apenas pagamentos extras reais (não inclui desconto de frete do comprador)
+  const estorno = order.payments
+    .filter((p: any) => p.operationType !== "regular_payment")
+    .reduce((acc: number, p: any) => acc + (p.totalPaidAmount ?? 0), 0);
 
-  // Custo do Produto + Imposto NF calculado sobre receita bruta por produto
+  // Imposto NF = alíquota global do cliente (efetiva na data do pedido) × receita bruta
+  const taxRate = await getEffectiveTaxRate(order.userId, order.dateCreated);
+  const nfTaxTotal = grossRevenue * (taxRate / 100);
+
+  // Custo do Produto (efetivo na data do pedido, por SKU)
   let productCostTotal = 0;
-  let nfTaxTotal = 0;
   let allCostsFound = true;
 
   for (const item of order.items) {
@@ -46,17 +50,9 @@ const estorno = order.payments
     });
 
     if (!cost) { allCostsFound = false; continue; }
-
-    // Custo do produto
     productCostTotal += cost.cost * item.quantity;
-
-    // Imposto NF = alíquota cadastrada × receita bruta proporcional do item
-    const itemRevenue = item.unitPrice * item.quantity;
-    nfTaxTotal += itemRevenue * (cost.taxRate / 100);
   }
 
-  // Fórmula final:
-  // Lucro = Receita Bruta - Tarifa ML - Frete - Imposto NF - Custo Produto - Imposto ML + Estorno
   const profit = grossRevenue - mlFee - shippingCost - nfTaxTotal - productCostTotal - mlTax + estorno;
   const margin = grossRevenue > 0 ? (profit / grossRevenue) * 100 : 0;
 
@@ -64,12 +60,13 @@ const estorno = order.payments
     grossRevenue,
     mlFee,
     shippingCost,
-    mlTax,          // só > 0 quando o ML retiver algo
+    mlTax,
     estorno,
     productCost: productCostTotal,
-    nfTax: nfTaxTotal,  // calculado sobre receita bruta × alíquota do SKU
+    nfTax: nfTaxTotal,
     profit,
     margin: parseFloat(margin.toFixed(2)),
     allCostsFound,
+    taxRate,
   };
 }

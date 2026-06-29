@@ -20,6 +20,8 @@ model User {
   settings    String?   // JSON
   liderId     Int?
   adminNotes  String?
+  taxSettings TaxSetting[]
+
 
   lider               User?               @relation("FuncionarioLider", fields: [liderId], references: [id])
   funcionarios        User[]              @relation("FuncionarioLider")
@@ -266,4 +268,13 @@ model PlanChange {
   admin     User? @relation("PlanChangedBy", fields: [changedBy], references: [id])
   fromPlan  Plan? @relation("PlanChangeFrom", fields: [fromPlanId], references: [id])
   toPlan    Plan  @relation("PlanChangeTo", fields: [toPlanId], references: [id])
+}
+model TaxSetting {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  rate      Float
+  validFrom DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
