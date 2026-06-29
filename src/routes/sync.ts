@@ -89,17 +89,18 @@ if (mlOrder.shipping?.id) {
             where: { mlId: String(mlOrder.id) },
           });
 
-          const orderData = {
-            status: mlOrder.status,
-            totalAmount: mlOrder.total_amount,
-            netReceived,
-            taxesAmount,
-            shippingCost,
-            dateCreated: new Date(mlOrder.date_created),
-            userId,
-	    shippingDiscount,
-            tokenId: token.id,
-          };
+const orderData = {
+  status: mlOrder.status,
+  totalAmount: mlOrder.total_amount,
+  netReceived,
+  taxesAmount,
+  shippingCost,
+  dateCreated: new Date(mlOrder.date_created),
+  userId,
+  shippingDiscount,
+  packId: mlOrder.pack_id ? String(mlOrder.pack_id) : null,
+  tokenId: token.id,
+};
 
           if (!existing) {
             const created = await prisma.order.create({
