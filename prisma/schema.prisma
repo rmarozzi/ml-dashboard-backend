@@ -110,6 +110,7 @@ model Session {
 model Order {
   id          Int      @id @default(autoincrement())
   mlId        String   @unique
+  packId        String?
   status      String
   totalAmount Float
   netReceived Float?
