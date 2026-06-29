@@ -19,12 +19,13 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
 
   const where: any = { tokenId: { in: tokenIds } };
   if (status) where.status = status;
-  if (search) {
-    where.OR = [
-      { mlId: { contains: search, mode: "insensitive" } },
-      { items: { some: { title: { contains: search, mode: "insensitive" } } } },
-    ];
-  }
+if (search) {
+  where.OR = [
+    { mlId: { contains: search, mode: "insensitive" } },
+    { packId: { contains: search, mode: "insensitive" } },
+    { items: { some: { title: { contains: search, mode: "insensitive" } } } },
+  ];
+}
 
   const pageNum = parseInt(page);
   const limitNum = Math.min(parseInt(limit) || 50, 200);
