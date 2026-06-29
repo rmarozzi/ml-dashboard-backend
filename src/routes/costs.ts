@@ -157,4 +157,62 @@ router.delete("/:id", requireAuth, requirePlan("prata"), requireFuncionarioPermi
   return res.json({ ok: true });
 });
 
+// ─── Atualização de produto ────────────────────────────────────────────────
+router.put("/:sku", requireAuth, requirePlan("prata"), requireFuncionarioPermission("manage_costs"), async (req, res) => {
+  const liderId = await getLiderId(req.user);
+  const sku = decodeURIComponent(req.params.sku);
+
+  const { name, cost, validFrom, ean, ncm, cest, codFabricante, marca } = req.body;
+
+  // Busca o registro mais recente desse SKU (para saber o estado atual)
+  const latest = await prisma.productCost.findFirst({
+    where: { userId: liderId, sku },
+    orderBy: { validFrom: "desc" },
+  });
+
+  if (!latest) {
+    return res.status(404).json({ message: "Produto não encontrado" });
+  }
+
+  // Campos cadastrais (sem versão) — atualiza em TODOS os registros desse SKU
+  const cadastralData: any = {};
+  if (name !== undefined) cadastralData.name = name.trim();
+  if (ean !== undefined) cadastralData.ean = ean?.toString().trim() || null;
+  if (ncm !== undefined) cadastralData.ncm = ncm?.toString().trim() || null;
+  if (cest !== undefined) cadastralData.cest = cest?.toString().trim() || null;
+  if (codFabricante !== undefined) cadastralData.codFabricante = codFabricante?.toString().trim() || null;
+  if (marca !== undefined) cadastralData.marca = marca?.toString().trim() || null;
+
+  if (Object.keys(cadastralData).length > 0) {
+    await prisma.productCost.updateMany({
+      where: { userId: liderId, sku },
+      data: cadastralData,
+    });
+  }
+
+  // Custo — versionado por data (cria novo registro, mantém o anterior intacto)
+  let newCostRecord = null;
+  if (cost != null && !isNaN(Number(cost))) {
+    const effectiveDate = validFrom ? new Date(validFrom) : new Date();
+
+    newCostRecord = await prisma.productCost.create({
+      data: {
+        userId: liderId,
+        sku,
+        name: cadastralData.name ?? latest.name,
+        cost: parseFloat(cost),
+        taxRate: 0,
+        validFrom: effectiveDate,
+        ean: cadastralData.ean !== undefined ? cadastralData.ean : latest.ean,
+        ncm: cadastralData.ncm !== undefined ? cadastralData.ncm : latest.ncm,
+        cest: cadastralData.cest !== undefined ? cadastralData.cest : latest.cest,
+        codFabricante: cadastralData.codFabricante !== undefined ? cadastralData.codFabricante : latest.codFabricante,
+        marca: cadastralData.marca !== undefined ? cadastralData.marca : latest.marca,
+      },
+    });
+  }
+
+  return res.json({ ok: true, newCost: newCostRecord });
+});
+
 export default router;
