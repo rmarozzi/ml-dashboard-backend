@@ -18,6 +18,7 @@ import exportRouter from "./routes/export";
 import adminRouter from "./routes/admin";
 import { runAlertJob } from "./jobs/alerts";
 import { runTokenRefreshJob } from "./lib/ml";
+import { runAutoSyncJob } from "./jobs/autoSync";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -77,13 +78,15 @@ app.listen(PORT, () => {
 
 // ─── ALERT CRON (every hour) ──────────────────────────────────────────────────
 if (process.env.NODE_ENV === "production") {
-  // Alertas — roda a cada hora
   setInterval(runAlertJob, 60 * 60 * 1000);
   setTimeout(runAlertJob, 5000);
 
-  // Renovação de tokens ML — roda a cada 5 horas
   setInterval(runTokenRefreshJob, 5 * 60 * 60 * 1000);
-  setTimeout(runTokenRefreshJob, 10000); // roda 10s após o boot
+  setTimeout(runTokenRefreshJob, 10000);
+
+  // Sync automático — verifica a cada hora quem tem essa opção ativada
+  setInterval(runAutoSyncJob, 60 * 60 * 1000);
+  setTimeout(runAutoSyncJob, 15000);
 }
 
 export default app;

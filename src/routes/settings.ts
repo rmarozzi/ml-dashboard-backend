@@ -6,17 +6,36 @@ import { getLiderId } from "../lib/filterMlAccounts";
 const router = Router();
 
 router.get("/", requireAuth, async (req, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { settings: true } });
-  const settings = user?.settings ? JSON.parse(user.settings) : {};
+  const liderId = await getLiderId(req.user);
+  const user = await prisma.user.findUnique({ where: { id: liderId }, select: { settings: true } });
+  const defaults = { autoSync: false, emailNotifications: true, syncAlerts: true };
+  const settings = user?.settings ? { ...defaults, ...JSON.parse(user.settings) } : defaults;
   return res.json({ settings });
 });
 
 router.post("/", requireAuth, async (req, res) => {
+  const liderId = await getLiderId(req.user);
+
+  // Só o líder pode mudar o autoSync (requer plano Ouro+)
+  if (req.body.autoSync !== undefined) {
+    const lider = await prisma.user.findUnique({
+      where: { id: liderId },
+      include: { subscription: { include: { plan: true } } },
+    });
+    if (req.body.autoSync && !lider?.subscription?.plan?.autoSync) {
+      return res.status(403).json({ message: "Sync automático disponível apenas no plano Ouro+" });
+    }
+  }
+
+  const current = await prisma.user.findUnique({ where: { id: liderId }, select: { settings: true } });
+  const currentSettings = current?.settings ? JSON.parse(current.settings) : {};
+  const merged = { ...currentSettings, ...req.body };
+
   await prisma.user.update({
-    where: { id: req.user.id },
-    data: { settings: JSON.stringify(req.body) },
+    where: { id: liderId },
+    data: { settings: JSON.stringify(merged) },
   });
-  return res.json({ ok: true });
+  return res.json({ ok: true, settings: merged });
 });
 
 // ─── Alíquota de Imposto NF (global, por cliente) ─────────────────────────────
