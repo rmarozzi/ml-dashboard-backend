@@ -153,6 +153,19 @@ const orderData = {
 
             // Pagamentos (estornos incluídos)
             for (const pay of mlOrder.payments ?? []) {
+  // Busca a data de liberação do dinheiro via Mercado Pago
+  let moneyReleaseDate: Date | null = null;
+  try {
+    const payDetailRes = await mlClient.get(`/v1/payments/${pay.id}`, {
+      baseURL: "https://api.mercadopago.com",
+    });
+    moneyReleaseDate = payDetailRes.data?.money_release_date
+      ? new Date(payDetailRes.data.money_release_date)
+      : null;
+  } catch {
+    // Nem todo pagamento tem esse dado disponível
+  }
+
   await prisma.payment.create({
     data: {
       orderId: created.id,
@@ -162,6 +175,7 @@ const orderData = {
       taxesAmount: pay.taxes_amount ?? 0,
       operationType: pay.operation_type ?? "regular_payment",
       paymentMethodId: pay.payment_method_id ?? null,
+      moneyReleaseDate,
     },
   });
 }
