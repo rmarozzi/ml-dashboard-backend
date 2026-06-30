@@ -7,6 +7,7 @@ const router = Router();
 
 router.get("/stats", requireAuth, async (req, res) => {
   const user = req.user;
+  const { brand } = req.query as { brand?: string };
   const tokenIds = await filterMlAccounts(user);
   const liderId = await getLiderId(user);
   const canViewProfit = user.role === "admin" || user.subscription?.plan?.canViewProfit;
@@ -45,6 +46,25 @@ router.get("/stats", requireAuth, async (req, res) => {
     return result;
   }
 
+  // ── Filtro por marca (se selecionado) ───────────────────────────────────────
+  let filteredOrders = orders;
+  if (brand) {
+    const skusOfBrand = new Set(
+      allCosts.filter((c) => c.marca === brand).map((c) => c.sku)
+    );
+    filteredOrders = orders
+      .map((o) => ({
+        ...o,
+        items: o.items.filter((i) => i.sku && skusOfBrand.has(i.sku)),
+      }))
+      .filter((o) => o.items.length > 0);
+  }
+
+  // Lista de marcas disponíveis (para popular o dropdown do filtro)
+  const availableBrands = Array.from(
+    new Set(allCosts.filter((c) => c.marca).map((c) => c.marca as string))
+  ).sort();
+
   function calcProfit(order: typeof orders[number]) {
     const grossRevenue = order.totalAmount;
     const mlFee = order.items.reduce((acc, i) => acc + (i.saleFee ?? 0) * i.quantity, 0);
@@ -65,19 +85,19 @@ router.get("/stats", requireAuth, async (req, res) => {
     }
 
     const profit = grossRevenue - mlFee - shippingCost - nfTax - productCost - mlTax + estorno;
-    const cmv = productCost; // Custo da Mercadoria Vendida
+    const cmv = productCost;
     return { grossRevenue, cmv, mlFee, shippingCost, nfTax, profit };
   }
 
   // ── Totais gerais ──────────────────────────────────────────────────────────
-  const totalRevenue = orders.reduce((a, o) => a + o.totalAmount, 0);
-  const totalOrders = orders.length;
+  const totalRevenue = filteredOrders.reduce((a, o) => a + o.totalAmount, 0);
+  const totalOrders = filteredOrders.length;
   const avgTicket = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
   let totalCmv = 0;
   let totalProfit = 0;
   if (canViewProfit) {
-    for (const o of orders) {
+    for (const o of filteredOrders) {
       const r = calcProfit(o);
       totalCmv += r.cmv;
       totalProfit += r.profit;
@@ -88,7 +108,7 @@ router.get("/stats", requireAuth, async (req, res) => {
   // ── Monthly data (gráfico, últimos 6 meses) ─────────────────────────────────
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  const monthlyOrders = orders.filter((o) => o.dateCreated >= sixMonthsAgo);
+  const monthlyOrders = filteredOrders.filter((o) => o.dateCreated >= sixMonthsAgo);
 
   const monthlyMap: Record<string, { receita: number; lucro: number }> = {};
   for (const o of monthlyOrders) {
@@ -114,7 +134,7 @@ router.get("/stats", requireAuth, async (req, res) => {
 
   // ── Recent orders ─────────────────────────────────────────────────────────
   const recentOrders = await Promise.all(
-    orders.slice(0, 10).map(async (order) => {
+    filteredOrders.slice(0, 10).map(async (order) => {
       let profit = null, margin = null;
       if (canViewProfit) {
         const r = calcProfit(order);
@@ -126,8 +146,6 @@ router.get("/stats", requireAuth, async (req, res) => {
   );
 
   // ── Venda por Canal (preparado para multi-marketplace; hoje só ML) ─────────
-  // No futuro, quando outros canais forem integrados, basta diferenciar por
-  // uma coluna "channel" no Order. Por enquanto, 100% é Mercado Livre.
   const vendaPorCanal = [
     {
       canal: "Mercado Livre",
@@ -138,13 +156,13 @@ router.get("/stats", requireAuth, async (req, res) => {
       cmvPct: canViewProfit && totalRevenue > 0 ? Math.round((totalCmv / totalRevenue) * 1000) / 10 : null,
       margem: canViewProfit ? Math.round(totalProfit * 100) / 100 : null,
       margemPct: canViewProfit ? Math.round(margin * 10) / 10 : null,
-      comissao: null, // reservado para configuração futura
+      comissao: null,
     },
   ];
 
   // ── Venda por Estado (UF) ───────────────────────────────────────────────────
   const stateMap: Record<string, { qtd: number; faturado: number; cmv: number; lucro: number }> = {};
-  for (const o of orders) {
+  for (const o of filteredOrders) {
     const uf = (o as any).buyerState || "—";
     if (!stateMap[uf]) stateMap[uf] = { qtd: 0, faturado: 0, cmv: 0, lucro: 0 };
     stateMap[uf].qtd += 1;
@@ -170,9 +188,8 @@ router.get("/stats", requireAuth, async (req, res) => {
 
   // ── Venda por Produto ───────────────────────────────────────────────────────
   const productMap: Record<string, { sku: string; name: string; qtd: number; faturado: number; cmv: number; lucro: number }> = {};
-  for (const o of orders) {
+  for (const o of filteredOrders) {
     const r = canViewProfit ? calcProfit(o) : null;
-    const orderRevenue = o.totalAmount;
     const itemsRevenue = o.items.reduce((a, i) => a + i.unitPrice * i.quantity, 0) || 1;
 
     for (const item of o.items) {
@@ -183,7 +200,6 @@ router.get("/stats", requireAuth, async (req, res) => {
       productMap[key].faturado += itemRevenue;
 
       if (canViewProfit && r) {
-        // Rateia o lucro/cmv do pedido proporcionalmente à receita de cada item
         const proportion = itemRevenue / itemsRevenue;
         productMap[key].cmv += r.cmv * proportion;
         productMap[key].lucro += r.profit * proportion;
@@ -203,7 +219,7 @@ router.get("/stats", requireAuth, async (req, res) => {
       margemPct: canViewProfit && p.faturado > 0 ? Math.round((p.lucro / p.faturado) * 1000) / 10 : null,
     }))
     .sort((a, b) => b.faturado - a.faturado)
-    .slice(0, 50); // top 50 produtos
+    .slice(0, 50);
 
   return res.json({
     totalRevenue: Math.round(totalRevenue * 100) / 100,
@@ -218,6 +234,8 @@ router.get("/stats", requireAuth, async (req, res) => {
     vendaPorCanal,
     vendaPorEstado,
     vendaPorProduto,
+    availableBrands,
+    selectedBrand: brand ?? null,
   });
 });
 
