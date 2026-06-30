@@ -8,7 +8,6 @@ import syncRouter from "./routes/sync";
 import dashboardRouter from "./routes/dashboard";
 import ordersRouter from "./routes/orders";
 import shipmentsRouter from "./routes/shipments";
-import analyticsRouter from "./routes/analytics";
 import costsRouter from "./routes/costs";
 import mlRouter from "./routes/ml";
 import employeesRouter from "./routes/employees";
@@ -54,7 +53,6 @@ app.use("/dashboard", dashboardRouter);
 app.use("/orders", ordersRouter);
 app.use("/profit", ordersRouter);           // /profit/orders
 app.use("/shipments", shipmentsRouter);
-app.use("/analytics", analyticsRouter);
 app.use("/costs", costsRouter);
 app.use("/ml", mlRouter);
 app.use("/employees", employeesRouter);
