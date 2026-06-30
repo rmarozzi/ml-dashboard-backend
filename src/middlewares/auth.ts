@@ -53,33 +53,17 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
 
 const PLAN_RANK: Record<string, number> = { bronze: 0, prata: 1, ouro: 2, premium: 3 };
 
+// Sistema de planos pagos desativado — todos os clientes têm acesso completo.
+// As funções abaixo são mantidas para não quebrar as rotas que as utilizam,
+// mas não aplicam mais nenhuma restrição.
 export function requirePlan(slug: string) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (req.user?.role === "admin") return next();
-
-    const user = req.user;
-    const liderId = user.role === "funcionario" ? user.liderId : user.id;
-    const sub = user.role === "funcionario"
-      ? null // will be checked via lider below
-      : user.subscription;
-
-    // For funcionarios, we trust the parent lider's plan which was loaded
-    const planSlug = user.subscription?.plan?.slug ?? null;
-
-    if (!planSlug || (PLAN_RANK[planSlug] ?? -1) < (PLAN_RANK[slug] ?? 0)) {
-      return res.status(403).json({ message: "Plano insuficiente", required: slug });
-    }
     next();
   };
 }
 
 export function requireFeature(feature: string) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (req.user?.role === "admin") return next();
-    const plan = req.user?.subscription?.plan;
-    if (!plan || !plan[feature]) {
-      return res.status(403).json({ message: "Funcionalidade não disponível no seu plano", feature });
-    }
     next();
   };
 }
