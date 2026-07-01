@@ -7,13 +7,24 @@ const router = Router();
 
 router.get("/stats", requireAuth, async (req, res) => {
   const user = req.user;
-  const { brand } = req.query as { brand?: string };
+  const { brand, dateFrom, dateTo } = req.query as { brand?: string; dateFrom?: string; dateTo?: string };
+
+  // Aceita várias marcas separadas por vírgula: ?brand=MarcaA,MarcaB
+  const brands = brand ? brand.split(",").map((b) => b.trim()).filter(Boolean) : [];
+
+  // Intervalo de datas (inclusive nas duas pontas)
+  const startDate = dateFrom ? new Date(dateFrom + "T00:00:00") : null;
+  const endDate = dateTo ? new Date(dateTo + "T23:59:59.999") : null;
+  const dateRangeWhere = (startDate || endDate)
+    ? { dateCreated: { ...(startDate ? { gte: startDate } : {}), ...(endDate ? { lte: endDate } : {}) } }
+    : {};
+
   const tokenIds = await filterMlAccounts(user);
   const liderId = await getLiderId(user);
   const canViewProfit = user.role === "admin" || user.subscription?.plan?.canViewProfit;
 
-  const orders = await prisma.order.findMany({
-    where: { tokenId: { in: tokenIds }, status: { not: "cancelled" } },
+const orders = await prisma.order.findMany({
+    where: { tokenId: { in: tokenIds }, status: { not: "cancelled" }, ...dateRangeWhere },
     include: { items: true, payments: true },
     orderBy: { dateCreated: "desc" },
   });
@@ -46,11 +57,11 @@ router.get("/stats", requireAuth, async (req, res) => {
     return result;
   }
 
-  // ── Filtro por marca (se selecionado) ───────────────────────────────────────
+// ── Filtro por marca (se selecionado, aceita múltiplas) ─────────────────────
   let filteredOrders = orders;
-  if (brand) {
+  if (brands.length > 0) {
     const skusOfBrand = new Set(
-      allCosts.filter((c) => c.marca === brand).map((c) => c.sku)
+      allCosts.filter((c) => c.marca && brands.includes(c.marca)).map((c) => c.sku)
     );
     filteredOrders = orders
       .map((o) => ({
@@ -126,9 +137,9 @@ router.get("/stats", requireAuth, async (req, res) => {
     }));
 
   // ── Status breakdown ─────────────────────────────────────────────────────
-  const statusBreakdown = await prisma.order.groupBy({
+const statusBreakdown = await prisma.order.groupBy({
     by: ["status"],
-    where: { tokenId: { in: tokenIds } },
+    where: { tokenId: { in: tokenIds }, ...dateRangeWhere },
     _count: { id: true },
   });
 
@@ -234,8 +245,10 @@ router.get("/stats", requireAuth, async (req, res) => {
     vendaPorCanal,
     vendaPorEstado,
     vendaPorProduto,
-    availableBrands,
-    selectedBrand: brand ?? null,
+availableBrands,
+    selectedBrands: brands,
+    selectedDateFrom: dateFrom ?? null,
+    selectedDateTo: dateTo ?? null,
   });
 });
 
