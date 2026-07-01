@@ -23,6 +23,8 @@ model User {
   taxSettings TaxSetting[]
 
 
+
+
   lider               User?               @relation("FuncionarioLider", fields: [liderId], references: [id])
   funcionarios        User[]              @relation("FuncionarioLider")
   tokens              Token[]
