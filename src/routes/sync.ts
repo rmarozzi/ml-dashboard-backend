@@ -6,7 +6,49 @@ import { getLiderId } from "../lib/filterMlAccounts";
 
 const router = Router();
 
+// Trava simples em memória — evita dois syncs simultâneos pro mesmo usuário
+const syncInProgress = new Set<number>();
+
+// Delay auxiliar
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Wrapper com retry automático em caso de rate limit (429)
+async function mlGetWithRetry(mlClient: any, url: string, options: any = {}, maxRetries = 5) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await mlClient.get(url, options);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      if (status === 429 && attempt < maxRetries) {
+        attempt++;
+        const waitMs = 1000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s, 32s
+        console.log(`[sync] Rate limit (429) em ${url} — tentativa ${attempt}/${maxRetries}, aguardando ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 export async function syncOrdersForUser(userId: number) {
+  if (syncInProgress.has(userId)) {
+    console.log(`[sync] Sync já em andamento para userId ${userId} — ignorando chamada duplicada`);
+    return [{ tokenId: null, status: "skipped", ordersNew: 0, ordersUpdated: 0, errorMessage: "Sync já em andamento" }];
+  }
+  syncInProgress.add(userId);
+
+  try {
+    return await runSyncForUser(userId);
+  } finally {
+    syncInProgress.delete(userId);
+  }
+}
+
+async function runSyncForUser(userId: number) {
   const tokens = await prisma.token.findMany({ where: { userId } });
   const results = [];
 
@@ -24,7 +66,7 @@ export async function syncOrdersForUser(userId: number) {
       // Busca mlUserId se não estiver salvo
       let sellerId = validToken.mlUserId;
       if (!sellerId) {
-        const meRes = await mlClient.get("/users/me");
+        const meRes = await mlGetWithRetry(mlClient, "/users/me");
         sellerId = String(meRes.data.id);
         await prisma.token.update({
           where: { id: validToken.id },
@@ -46,13 +88,18 @@ export async function syncOrdersForUser(userId: number) {
         };
         if (scrollId) params.scroll_id = scrollId;
 
-        const mlRes = await mlClient.get("/orders/search", { params });
+        const mlRes = await mlGetWithRetry(mlClient, "/orders/search", { params });
 
         const mlOrders = mlRes.data.results ?? [];
         scrollId = mlRes.data.scroll_id;
         allMlOrders.push(...mlOrders);
 
+        console.log(`[sync] userId ${userId} — página coletada: +${mlOrders.length} pedidos (total acumulado: ${allMlOrders.length})`);
+
         hasMore = mlOrders.length > 0 && !!scrollId;
+
+        // Pequeno delay entre páginas pra reduzir pressão na API
+        if (hasMore) await sleep(300);
       }
 
       // ── Agrupa pedidos por shipment (mesmo shipping.id = mesmo pack) ────────
@@ -85,7 +132,7 @@ export async function syncOrdersForUser(userId: number) {
               let discount = 0;
 
               try {
-                const shipDetailRes = await mlClient.get(`/shipments/${shipId}`);
+                const shipDetailRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}`);
                 status = shipDetailRes.data?.status ?? "pending";
                 tracking = shipDetailRes.data?.tracking_number ?? null;
               } catch {
@@ -93,7 +140,7 @@ export async function syncOrdersForUser(userId: number) {
               }
 
               try {
-                const shipCostsRes = await mlClient.get(`/shipments/${shipId}/costs`);
+                    const shipCostsRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}/costs`);
                 const senders = shipCostsRes.data?.senders ?? [];
                 const receiver = shipCostsRes.data?.receiver ?? {};
                 cost = senders.length > 0 ? (senders[0].cost ?? null) : null;
@@ -131,7 +178,7 @@ let buyerCity: string | null = null;
 let buyerState: string | null = null;
 
 try {
-  const billingRes = await mlClient.get(`/orders/${mlOrder.id}/billing_info`);
+  const billingRes = await mlGetWithRetry(mlClient, `/orders/${mlOrder.id}/billing_info`);
   const info = billingRes.data?.billing_info?.additional_info ?? [];
   const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
 
@@ -177,6 +224,8 @@ const orderData = {
               data: { mlId: String(mlOrder.id), ...orderData },
             });
 
+            await sleep(100); // reduz pressão na API entre pedidos processados
+
             // Itens com sale_fee
             for (const item of mlOrder.order_items ?? []) {
               await prisma.item.create({
@@ -197,7 +246,7 @@ const orderData = {
   // Busca a data de liberação do dinheiro via Mercado Pago
   let moneyReleaseDate: Date | null = null;
   try {
-    const payDetailRes = await mlClient.get(`/v1/payments/${pay.id}`, {
+    const payDetailRes = await mlGetWithRetry(mlClient, `/v1/payments/${pay.id}`, {
       baseURL: "https://api.mercadopago.com",
     });
     moneyReleaseDate = payDetailRes.data?.money_release_date
