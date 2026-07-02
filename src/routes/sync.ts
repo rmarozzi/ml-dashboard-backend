@@ -32,23 +32,27 @@ export async function syncOrdersForUser(userId: number) {
         });
       }
 
-// ── 1ª passada: coleta todos os pedidos de todas as páginas ─────────────
-      let offset = 0;
-      const pageSize = 50;
+// ── 1ª passada: coleta todos os pedidos via scroll (sem limite de 10k) ──
+      const pageSize = 100;
+      let scrollId: string | undefined = undefined;
       let hasMore = true;
       const allMlOrders: any[] = [];
 
       while (hasMore) {
-        const mlRes = await mlClient.get("/orders/search", {
-          params: { seller: sellerId, sort: "date_desc", limit: pageSize, offset },
-        });
+        const params: Record<string, any> = {
+          seller: sellerId,
+          search_type: "scan",
+          limit: pageSize,
+        };
+        if (scrollId) params.scroll_id = scrollId;
+
+        const mlRes = await mlClient.get("/orders/search", { params });
 
         const mlOrders = mlRes.data.results ?? [];
-        const total = mlRes.data.paging?.total ?? 0;
+        scrollId = mlRes.data.scroll_id;
         allMlOrders.push(...mlOrders);
 
-        offset += pageSize;
-        hasMore = mlOrders.length === pageSize && offset < total;
+        hasMore = mlOrders.length > 0 && !!scrollId;
       }
 
       // ── Agrupa pedidos por shipment (mesmo shipping.id = mesmo pack) ────────
