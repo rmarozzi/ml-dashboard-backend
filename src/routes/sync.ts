@@ -33,7 +33,7 @@ export async function syncOrdersForUser(userId: number) {
       }
 
 // ── 1ª passada: coleta todos os pedidos via scroll (sem limite de 10k) ──
-      const pageSize = 100;
+      const pageSize = 50;
       let scrollId: string | undefined = undefined;
       let hasMore = true;
       const allMlOrders: any[] = [];
