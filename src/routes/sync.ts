@@ -246,7 +246,6 @@ const orderData = {
           }
         }
 
-}
       }
     } catch (err: any) {
 
