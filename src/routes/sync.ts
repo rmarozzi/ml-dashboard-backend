@@ -74,31 +74,24 @@ async function runSyncForUser(userId: number) {
         });
       }
 
-// ── 1ª passada: coleta todos os pedidos via scroll (sem limite de 10k) ──
+      // ── 1ª passada: coleta todos os pedidos de todas as páginas (offset) ────
+      let offset = 0;
       const pageSize = 50;
-      let scrollId: string | undefined = undefined;
       let hasMore = true;
       const allMlOrders: any[] = [];
 
       while (hasMore) {
-        const params: Record<string, any> = {
-          seller: sellerId,
-          search_type: "scan",
-          limit: pageSize,
-        };
-        if (scrollId) params.scroll_id = scrollId;
-
-        const mlRes = await mlGetWithRetry(mlClient, "/orders/search", { params });
+        const mlRes = await mlGetWithRetry(mlClient, "/orders/search", {
+          params: { seller: sellerId, sort: "date_desc", limit: pageSize, offset },
+        });
 
         const mlOrders = mlRes.data.results ?? [];
-        scrollId = mlRes.data.scroll_id;
+        const total = mlRes.data.paging?.total ?? 0;
         allMlOrders.push(...mlOrders);
 
-        console.log(`[sync] userId ${userId} — página coletada: +${mlOrders.length} pedidos (total acumulado: ${allMlOrders.length})`);
+        offset += pageSize;
+        hasMore = mlOrders.length === pageSize && offset < total;
 
-        hasMore = mlOrders.length > 0 && !!scrollId;
-
-        // Pequeno delay entre páginas pra reduzir pressão na API
         if (hasMore) await sleep(300);
       }
 
@@ -114,194 +107,190 @@ async function runSyncForUser(userId: number) {
       const shipmentCache: Record<string, { status: string; tracking: string | null; cost: number | null; discount: number }> = {};
 
       // ── 2ª passada: processa cada pedido individualmente ─────────────────────
-      {
-        for (const mlOrder of allMlOrders) {
-          // Custo do frete via endpoint separado (com cache + rateio por pack)
-          let shippingCost: number | null = null;
-          let shippingDiscount = 0;
-          let shippingStatus = "pending";
-          let trackingNumber: string | null = null;
+      for (const mlOrder of allMlOrders) {
+        // Custo do frete via endpoint separado (com cache + rateio por pack)
+        let shippingCost: number | null = null;
+        let shippingDiscount = 0;
+        let shippingStatus = "pending";
+        let trackingNumber: string | null = null;
 
-          if (mlOrder.shipping?.id) {
-            const shipId = String(mlOrder.shipping.id);
+        if (mlOrder.shipping?.id) {
+          const shipId = String(mlOrder.shipping.id);
 
-            if (!shipmentCache[shipId]) {
-              let status = "pending";
-              let tracking: string | null = null;
-              let cost: number | null = null;
-              let discount = 0;
+          if (!shipmentCache[shipId]) {
+            let statusShip = "pending";
+            let tracking: string | null = null;
+            let cost: number | null = null;
+            let discount = 0;
 
-              try {
-                const shipDetailRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}`);
-                status = shipDetailRes.data?.status ?? "pending";
-                tracking = shipDetailRes.data?.tracking_number ?? null;
-              } catch {
-                status = mlOrder.shipping.status ?? "pending";
-              }
-
-              try {
-                    const shipCostsRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}/costs`);
-                const senders = shipCostsRes.data?.senders ?? [];
-                const receiver = shipCostsRes.data?.receiver ?? {};
-                cost = senders.length > 0 ? (senders[0].cost ?? null) : null;
-                discount = receiver.save ?? 0;
-              } catch {
-                cost = null;
-              }
-
-              shipmentCache[shipId] = { status, tracking, cost, discount };
+            try {
+              const shipDetailRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}`);
+              statusShip = shipDetailRes.data?.status ?? "pending";
+              tracking = shipDetailRes.data?.tracking_number ?? null;
+            } catch {
+              statusShip = mlOrder.shipping.status ?? "pending";
             }
 
-            const cached = shipmentCache[shipId];
-            shippingStatus = cached.status;
-            trackingNumber = cached.tracking;
-            shippingDiscount = cached.discount;
+            try {
+              const shipCostsRes = await mlGetWithRetry(mlClient, `/shipments/${shipId}/costs`);
+              const senders = shipCostsRes.data?.senders ?? [];
+              const receiver = shipCostsRes.data?.receiver ?? {};
+              cost = senders.length > 0 ? (senders[0].cost ?? null) : null;
+              discount = receiver.save ?? 0;
+            } catch {
+              cost = null;
+            }
 
-            // Rateia o custo do frete entre os pedidos do mesmo pack
-            const orderCount = shipmentOrderCount[shipId] ?? 1;
-            shippingCost = cached.cost != null ? cached.cost / orderCount : null;
+            shipmentCache[shipId] = { status: statusShip, tracking, cost, discount };
           }
 
-          // Tarifa ML = soma dos sale_fee dos itens
-          const mlFee = (mlOrder.order_items ?? []).reduce(
-            (acc: number, item: any) => acc + (item.sale_fee ?? 0), 0
-          );
+          const cached = shipmentCache[shipId];
+          shippingStatus = cached.status;
+          trackingNumber = cached.tracking;
+          shippingDiscount = cached.discount;
 
-          // Imposto NF
-          const taxesAmount = mlOrder.taxes?.amount ?? 0;
-
-// Busca dados do comprador (nome, documento, localização)
-let buyerName: string | null = null;
-let buyerDocType: string | null = null;
-let buyerDocNumber: string | null = null;
-let buyerCity: string | null = null;
-let buyerState: string | null = null;
-
-try {
-  const billingRes = await mlGetWithRetry(mlClient, `/orders/${mlOrder.id}/billing_info`);
-  const info = billingRes.data?.billing_info?.additional_info ?? [];
-  const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
-
-  const firstName = getField("FIRST_NAME");
-  const lastName = getField("LAST_NAME");
-  buyerName = [firstName, lastName].filter(Boolean).join(" ") || null;
-  buyerDocType = getField("DOC_TYPE");
-  buyerDocNumber = getField("DOC_NUMBER");
-  buyerCity = getField("CITY_NAME");
-  const stateCode = getField("STATE_CODE"); // ex: "BR-SP"
-  buyerState = stateCode ? stateCode.replace("BR-", "") : null;
-} catch {
-  // Billing info pode não estar disponível para todos os pedidos
-}
-
-          // Valor líquido recebido = total - tarifa - frete
-          const netReceived = mlOrder.total_amount - mlFee - (shippingCost ?? 0);
-
-          const existing = await prisma.order.findUnique({
-            where: { mlId: String(mlOrder.id) },
-          });
-
-const orderData = {
-  status: mlOrder.status,
-  totalAmount: mlOrder.total_amount,
-  netReceived,
-  taxesAmount,
-  shippingCost,
-  dateCreated: new Date(mlOrder.date_created),
-  userId,
-  shippingDiscount,
-  packId: mlOrder.pack_id ? String(mlOrder.pack_id) : null,
-  buyerName,
-  buyerDocType,
-  buyerDocNumber,
-  buyerCity,
-  buyerState,
-  tokenId: token.id,
-};
-
-          if (!existing) {
-            const created = await prisma.order.create({
-              data: { mlId: String(mlOrder.id), ...orderData },
-            });
-
-            await sleep(100); // reduz pressão na API entre pedidos processados
-
-            // Itens com sale_fee
-            for (const item of mlOrder.order_items ?? []) {
-              await prisma.item.create({
-                data: {
-                  orderId: created.id,
-                  mlItemId: String(item.item?.id ?? ""),
-                  title: item.item?.title ?? "—",
-                  quantity: item.quantity,
-                  unitPrice: item.unit_price,
-                  sku: item.item?.seller_sku ?? null,
-                  saleFee: item.sale_fee ?? 0,
-                },
-              });
-            }
-
-            // Pagamentos (estornos incluídos)
-            for (const pay of mlOrder.payments ?? []) {
-  // Busca a data de liberação do dinheiro via Mercado Pago
-  let moneyReleaseDate: Date | null = null;
-  try {
-    const payDetailRes = await mlGetWithRetry(mlClient, `/v1/payments/${pay.id}`, {
-      baseURL: "https://api.mercadopago.com",
-    });
-    moneyReleaseDate = payDetailRes.data?.money_release_date
-      ? new Date(payDetailRes.data.money_release_date)
-      : null;
-  } catch {
-    // Nem todo pagamento tem esse dado disponível
-  }
-
-  await prisma.payment.create({
-    data: {
-      orderId: created.id,
-      mlPaymentId: String(pay.id),
-      status: pay.status,
-      totalPaidAmount: pay.total_paid_amount ?? 0,
-      taxesAmount: pay.taxes_amount ?? 0,
-      operationType: pay.operation_type ?? "regular_payment",
-      paymentMethodId: pay.payment_method_id ?? null,
-      moneyReleaseDate,
-    },
-  });
-}
-
-// Envio com status real e custo
-            if (mlOrder.shipping?.id) {
-              await prisma.shipment.upsert({
-                where: { orderId: created.id },
-                create: {
-                  orderId: created.id,
-                  mlShipmentId: String(mlOrder.shipping.id),
-                  status: shippingStatus,
-                  trackingNumber: trackingNumber,
-                  cost: shippingCost,
-                  dateCreated: new Date(mlOrder.date_created),
-                },
-                update: {
-                  status: shippingStatus,
-                  trackingNumber: trackingNumber,
-                  cost: shippingCost,
-                },
-              });
-            }
-            ordersNew++;
-          } else {
-            await prisma.order.update({
-              where: { id: existing.id },
-              data: orderData,
-            });
-            ordersUpdated++;
-          }
+          // Rateia o custo do frete entre os pedidos do mesmo pack
+          const orderCount = shipmentOrderCount[shipId] ?? 1;
+          shippingCost = cached.cost != null ? cached.cost / orderCount : null;
         }
 
+        // Tarifa ML = soma dos sale_fee dos itens
+        const mlFee = (mlOrder.order_items ?? []).reduce(
+          (acc: number, item: any) => acc + (item.sale_fee ?? 0), 0
+        );
+
+        // Imposto NF
+        const taxesAmount = mlOrder.taxes?.amount ?? 0;
+
+        // Busca dados do comprador (nome, documento, localização)
+        let buyerName: string | null = null;
+        let buyerDocType: string | null = null;
+        let buyerDocNumber: string | null = null;
+        let buyerCity: string | null = null;
+        let buyerState: string | null = null;
+
+        try {
+          const billingRes = await mlGetWithRetry(mlClient, `/orders/${mlOrder.id}/billing_info`);
+          const info = billingRes.data?.billing_info?.additional_info ?? [];
+          const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
+
+          const firstName = getField("FIRST_NAME");
+          const lastName = getField("LAST_NAME");
+          buyerName = [firstName, lastName].filter(Boolean).join(" ") || null;
+          buyerDocType = getField("DOC_TYPE");
+          buyerDocNumber = getField("DOC_NUMBER");
+          buyerCity = getField("CITY_NAME");
+          const stateCode = getField("STATE_CODE"); // ex: "BR-SP"
+          buyerState = stateCode ? stateCode.replace("BR-", "") : null;
+        } catch {
+          // Billing info pode não estar disponível para todos os pedidos
+        }
+
+        // Valor líquido recebido = total - tarifa - frete
+        const netReceived = mlOrder.total_amount - mlFee - (shippingCost ?? 0);
+
+        const existing = await prisma.order.findUnique({
+          where: { mlId: String(mlOrder.id) },
+        });
+
+        const orderData = {
+          status: mlOrder.status,
+          totalAmount: mlOrder.total_amount,
+          netReceived,
+          taxesAmount,
+          shippingCost,
+          dateCreated: new Date(mlOrder.date_created),
+          userId,
+          shippingDiscount,
+          packId: mlOrder.pack_id ? String(mlOrder.pack_id) : null,
+          buyerName,
+          buyerDocType,
+          buyerDocNumber,
+          buyerCity,
+          buyerState,
+          tokenId: token.id,
+        };
+
+        if (!existing) {
+          const created = await prisma.order.create({
+            data: { mlId: String(mlOrder.id), ...orderData },
+          });
+
+          await sleep(100); // reduz pressão na API entre pedidos processados
+
+          // Itens com sale_fee
+          for (const item of mlOrder.order_items ?? []) {
+            await prisma.item.create({
+              data: {
+                orderId: created.id,
+                mlItemId: String(item.item?.id ?? ""),
+                title: item.item?.title ?? "—",
+                quantity: item.quantity,
+                unitPrice: item.unit_price,
+                sku: item.item?.seller_sku ?? null,
+                saleFee: item.sale_fee ?? 0,
+              },
+            });
+          }
+
+          // Pagamentos (estornos incluídos)
+          for (const pay of mlOrder.payments ?? []) {
+            // Busca a data de liberação do dinheiro via Mercado Pago
+            let moneyReleaseDate: Date | null = null;
+            try {
+              const payDetailRes = await mlGetWithRetry(mlClient, `/v1/payments/${pay.id}`, {
+                baseURL: "https://api.mercadopago.com",
+              });
+              moneyReleaseDate = payDetailRes.data?.money_release_date
+                ? new Date(payDetailRes.data.money_release_date)
+                : null;
+            } catch {
+              // Nem todo pagamento tem esse dado disponível
+            }
+
+            await prisma.payment.create({
+              data: {
+                orderId: created.id,
+                mlPaymentId: String(pay.id),
+                status: pay.status,
+                totalPaidAmount: pay.total_paid_amount ?? 0,
+                taxesAmount: pay.taxes_amount ?? 0,
+                operationType: pay.operation_type ?? "regular_payment",
+                paymentMethodId: pay.payment_method_id ?? null,
+                moneyReleaseDate,
+              },
+            });
+          }
+
+          // Envio com status real e custo
+          if (mlOrder.shipping?.id) {
+            await prisma.shipment.upsert({
+              where: { orderId: created.id },
+              create: {
+                orderId: created.id,
+                mlShipmentId: String(mlOrder.shipping.id),
+                status: shippingStatus,
+                trackingNumber: trackingNumber,
+                cost: shippingCost,
+                dateCreated: new Date(mlOrder.date_created),
+              },
+              update: {
+                status: shippingStatus,
+                trackingNumber: trackingNumber,
+                cost: shippingCost,
+              },
+            });
+          }
+          ordersNew++;
+        } else {
+          await prisma.order.update({
+            where: { id: existing.id },
+            data: orderData,
+          });
+          ordersUpdated++;
+        }
       }
     } catch (err: any) {
-
       status = "failed";
       errorMessage = err?.response?.data
         ? JSON.stringify(err.response.data)
