@@ -32,10 +32,11 @@ export async function syncOrdersForUser(userId: number) {
         });
       }
 
-      // Paginação — busca todos os pedidos
+// ── 1ª passada: coleta todos os pedidos de todas as páginas ─────────────
       let offset = 0;
       const pageSize = 50;
       let hasMore = true;
+      const allMlOrders: any[] = [];
 
       while (hasMore) {
         const mlRes = await mlClient.get("/orders/search", {
@@ -44,35 +45,71 @@ export async function syncOrdersForUser(userId: number) {
 
         const mlOrders = mlRes.data.results ?? [];
         const total = mlRes.data.paging?.total ?? 0;
+        allMlOrders.push(...mlOrders);
 
-        for (const mlOrder of mlOrders) {
-          // Custo do frete via endpoint separado
+        offset += pageSize;
+        hasMore = mlOrders.length === pageSize && offset < total;
+      }
+
+      // ── Agrupa pedidos por shipment (mesmo shipping.id = mesmo pack) ────────
+      const shipmentOrderCount: Record<string, number> = {};
+      for (const o of allMlOrders) {
+        const shipId = o.shipping?.id;
+        if (!shipId) continue;
+        shipmentOrderCount[shipId] = (shipmentOrderCount[shipId] ?? 0) + 1;
+      }
+
+      // Cache pra não buscar o mesmo shipment várias vezes
+      const shipmentCache: Record<string, { status: string; tracking: string | null; cost: number | null; discount: number }> = {};
+
+      // ── 2ª passada: processa cada pedido individualmente ─────────────────────
+      {
+        for (const mlOrder of allMlOrders) {
+          // Custo do frete via endpoint separado (com cache + rateio por pack)
           let shippingCost: number | null = null;
-let shippingDiscount = 0;
-let shippingStatus = "pending";
-let trackingNumber: string | null = null;
+          let shippingDiscount = 0;
+          let shippingStatus = "pending";
+          let trackingNumber: string | null = null;
 
-if (mlOrder.shipping?.id) {
-  // Busca status real e número de rastreio
-  try {
-    const shipDetailRes = await mlClient.get(`/shipments/${mlOrder.shipping.id}`);
-    shippingStatus = shipDetailRes.data?.status ?? "pending";
-    trackingNumber = shipDetailRes.data?.tracking_number ?? null;
-  } catch {
-    shippingStatus = mlOrder.shipping.status ?? "pending";
-  }
+          if (mlOrder.shipping?.id) {
+            const shipId = String(mlOrder.shipping.id);
 
-  // Busca custo do frete e desconto/estorno
-  try {
-    const shipCostsRes = await mlClient.get(`/shipments/${mlOrder.shipping.id}/costs`);
-    const senders = shipCostsRes.data?.senders ?? [];
-    const receiver = shipCostsRes.data?.receiver ?? {};
-    shippingCost = senders.length > 0 ? (senders[0].cost ?? null) : null;
-    shippingDiscount = receiver.save ?? 0;
-  } catch {
-    shippingCost = null;
-  }
-}
+            if (!shipmentCache[shipId]) {
+              let status = "pending";
+              let tracking: string | null = null;
+              let cost: number | null = null;
+              let discount = 0;
+
+              try {
+                const shipDetailRes = await mlClient.get(`/shipments/${shipId}`);
+                status = shipDetailRes.data?.status ?? "pending";
+                tracking = shipDetailRes.data?.tracking_number ?? null;
+              } catch {
+                status = mlOrder.shipping.status ?? "pending";
+              }
+
+              try {
+                const shipCostsRes = await mlClient.get(`/shipments/${shipId}/costs`);
+                const senders = shipCostsRes.data?.senders ?? [];
+                const receiver = shipCostsRes.data?.receiver ?? {};
+                cost = senders.length > 0 ? (senders[0].cost ?? null) : null;
+                discount = receiver.save ?? 0;
+              } catch {
+                cost = null;
+              }
+
+              shipmentCache[shipId] = { status, tracking, cost, discount };
+            }
+
+            const cached = shipmentCache[shipId];
+            shippingStatus = cached.status;
+            trackingNumber = cached.tracking;
+            shippingDiscount = cached.discount;
+
+            // Rateia o custo do frete entre os pedidos do mesmo pack
+            const orderCount = shipmentOrderCount[shipId] ?? 1;
+            shippingCost = cached.cost != null ? cached.cost / orderCount : null;
+          }
 
           // Tarifa ML = soma dos sale_fee dos itens
           const mlFee = (mlOrder.order_items ?? []).reduce(
@@ -209,10 +246,10 @@ const orderData = {
           }
         }
 
-        offset += pageSize;
-        hasMore = mlOrders.length === pageSize && offset < total;
+}
       }
     } catch (err: any) {
+
       status = "failed";
       errorMessage = err?.response?.data
         ? JSON.stringify(err.response.data)
