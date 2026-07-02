@@ -74,25 +74,62 @@ async function runSyncForUser(userId: number) {
         });
       }
 
-      // ── 1ª passada: coleta todos os pedidos de todas as páginas (offset) ────
-      let offset = 0;
+      // ── 1ª passada: descobre a data do pedido mais antigo ────────────────────
+      const oldestRes = await mlGetWithRetry(mlClient, "/orders/search", {
+        params: { seller: sellerId, sort: "date_asc", limit: 1, offset: 0 },
+      });
+      const oldestOrder = oldestRes.data.results?.[0];
+      const startDate = oldestOrder ? new Date(oldestOrder.date_created) : new Date();
+      startDate.setHours(0, 0, 0, 0);
+
+      console.log(`[sync] userId ${userId} — pedido mais antigo encontrado em ${startDate.toISOString().slice(0,10)}`);
+
+      // ── 2ª passada: coleta todos os pedidos, semana a semana (evita limite de 10k) ──
       const pageSize = 50;
-      let hasMore = true;
       const allMlOrders: any[] = [];
+      const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
 
-      while (hasMore) {
-        const mlRes = await mlGetWithRetry(mlClient, "/orders/search", {
-          params: { seller: sellerId, sort: "date_desc", limit: pageSize, offset },
-        });
+      for (
+        let weekStart = new Date(startDate);
+        weekStart.getTime() <= Date.now();
+        weekStart = new Date(weekStart.getTime() + oneWeekMs)
+      ) {
+        const weekEnd = new Date(Math.min(weekStart.getTime() + oneWeekMs - 1, Date.now()));
 
-        const mlOrders = mlRes.data.results ?? [];
-        const total = mlRes.data.paging?.total ?? 0;
-        allMlOrders.push(...mlOrders);
+        let offset = 0;
+        let hasMoreInWeek = true;
+        let weekCount = 0;
 
-        offset += pageSize;
-        hasMore = mlOrders.length === pageSize && offset < total;
+        while (hasMoreInWeek) {
+          const params: Record<string, any> = {
+            seller: sellerId,
+            limit: pageSize,
+            offset,
+            "order.date_created.from": weekStart.toISOString(),
+            "order.date_created.to": weekEnd.toISOString(),
+          };
 
-        if (hasMore) await sleep(300);
+          const mlRes = await mlGetWithRetry(mlClient, "/orders/search", { params });
+          const mlOrders = mlRes.data.results ?? [];
+          const total = mlRes.data.paging?.total ?? 0;
+
+          allMlOrders.push(...mlOrders);
+          weekCount += mlOrders.length;
+          offset += pageSize;
+          hasMoreInWeek = mlOrders.length === pageSize && offset < total;
+
+          if (total > 9900) {
+            console.log(`[sync] ALERTA userId ${userId} — semana de ${weekStart.toISOString().slice(0,10)} tem ${total} pedidos, perto do limite de 10k!`);
+          }
+
+          if (hasMoreInWeek) await sleep(300);
+        }
+
+        if (weekCount > 0) {
+          console.log(`[sync] userId ${userId} — semana de ${weekStart.toISOString().slice(0,10)}: ${weekCount} pedidos (total acumulado: ${allMlOrders.length})`);
+        }
+
+        await sleep(150); // delay entre semanas
       }
 
       // ── Agrupa pedidos por shipment (mesmo shipping.id = mesmo pack) ────────
@@ -106,7 +143,7 @@ async function runSyncForUser(userId: number) {
       // Cache pra não buscar o mesmo shipment várias vezes
       const shipmentCache: Record<string, { status: string; tracking: string | null; cost: number | null; discount: number }> = {};
 
-      // ── 2ª passada: processa cada pedido individualmente ─────────────────────
+      // ── 3ª passada: processa cada pedido individualmente ─────────────────────
       for (const mlOrder of allMlOrders) {
         // Custo do frete via endpoint separado (com cache + rateio por pack)
         let shippingCost: number | null = null;
