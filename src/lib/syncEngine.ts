@@ -326,10 +326,17 @@ async function runInitialBackfill(mlClient: any, sellerId: string, userId: numbe
 
   const result = await processOrderBatch(mlClient, allMlOrders, userId, tokenId);
 
-  await prisma.token.update({
-    where: { id: tokenId },
-    data: { initialSyncDone: true, lastSyncAt: new Date() },
-  });
+  console.log(`[sync] tokenId ${tokenId} — backfill concluído (${result.ordersNew} novos, ${result.ordersUpdated} atualizados). Gravando initialSyncDone...`);
+  try {
+    const updated = await prisma.token.update({
+      where: { id: tokenId },
+      data: { initialSyncDone: true, lastSyncAt: new Date() },
+    });
+    console.log(`[sync] tokenId ${tokenId} — gravado: initialSyncDone=${updated.initialSyncDone}, lastSyncAt=${updated.lastSyncAt?.toISOString()}`);
+  } catch (err: any) {
+    console.error(`[sync] tokenId ${tokenId} — FALHA ao gravar initialSyncDone:`, err?.message ?? err);
+    throw err;
+  }
 
   return result;
 }
