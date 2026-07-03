@@ -91,6 +91,8 @@ model Token {
   apelido      String?
   mlUserId     String?
   mlNickname   String?
+  lastSyncAt      DateTime?               // NOVO
+  initialSyncDone Boolean  @default(false) // NOVO
 
   user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders           Order[]
@@ -160,6 +162,7 @@ model Payment {
   operationType   String   @default("regular_payment")
   paymentMethodId String?
   moneyReleaseDate DateTime?
+  mlPaymentId     String?  @unique   // ← adicionar @unique
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }

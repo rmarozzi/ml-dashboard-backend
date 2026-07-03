@@ -1,3 +1,12 @@
+// src/lib/ml.ts
+//
+// Única mudança em relação ao arquivo atual: getValidToken agora usa um
+// mapa de promises em andamento por tokenId, para que duas chamadas
+// concorrentes que precisem renovar o mesmo token esperem a MESMA
+// renovação, em vez de disparar duas trocas de refresh_token em paralelo
+// (o ML rotaciona o refresh_token a cada troca, então a segunda chamada
+// concorrente falharia usando um refresh_token já invalidado pela primeira).
+
 import axios from "axios";
 import prisma from "./prisma";
 
@@ -37,6 +46,9 @@ export async function refreshToken(tokenId: number) {
   return updated;
 }
 
+// Evita que duas chamadas concorrentes renovem o mesmo token ao mesmo tempo.
+const refreshInFlight = new Map<number, Promise<any>>();
+
 export async function getValidToken(tokenId: number) {
   let tokenRecord = await prisma.token.findUnique({ where: { id: tokenId } });
   if (!tokenRecord) throw new Error("Token not found");
@@ -44,7 +56,11 @@ export async function getValidToken(tokenId: number) {
   // Renova se expira em menos de 1 hora
   const expiresInMs = tokenRecord.expiresAt.getTime() - Date.now();
   if (expiresInMs < 60 * 60 * 1000) {
-    tokenRecord = await refreshToken(tokenId);
+    if (!refreshInFlight.has(tokenId)) {
+      const promise = refreshToken(tokenId).finally(() => refreshInFlight.delete(tokenId));
+      refreshInFlight.set(tokenId, promise);
+    }
+    tokenRecord = await refreshInFlight.get(tokenId)!;
   }
   return tokenRecord;
 }
@@ -66,7 +82,6 @@ export async function runTokenRefreshJob() {
       await refreshToken(token.id);
     } catch (err: any) {
       console.error(`[TokenRefreshJob] Falha ao renovar token #${token.id}:`, err?.message);
-      // Cria alerta para o admin
       await prisma.adminAlert.create({
         data: {
           type: "token_refresh_failed",

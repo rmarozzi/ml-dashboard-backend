@@ -1,10 +1,17 @@
+// src/jobs/autoSync.ts
+//
+// Duas mudanças em relação ao arquivo atual:
+//   1. Importa syncOrdersForUser de ../lib/syncEngine (antes vinha de ../routes/sync)
+//   2. Janela anti-duplicidade caiu de 50 para 10 minutos, porque a cadência
+//      do cron em src/index.ts passa de 1h para 15min — 50min fazia sentido
+//      pra uma cadência horária, não faz mais sentido aqui.
+
 import prisma from "../lib/prisma";
-import { syncOrdersForUser } from "../routes/sync";
+import { syncOrdersForUser } from "../lib/syncEngine";
 
 export async function runAutoSyncJob() {
   console.log("[AutoSyncJob] Verificando clientes com sync automático ativo...");
 
-  // Busca líderes ativos, com plano Ouro+ (que suporta autoSync) e settings.autoSync = true
   const liders = await prisma.user.findMany({
     where: {
       role: "lider",
@@ -30,10 +37,11 @@ export async function runAutoSyncJob() {
   console.log(`[AutoSyncJob] ${eligible.length} cliente(s) com sync automático ativo`);
 
   for (const user of eligible) {
-    // Evita sync duplicado se já rodou nos últimos 50 minutos
+    // Evita sync duplicado se já rodou nos últimos 10 minutos
+    // (cadência do cron é 15 min — ver src/index.ts)
     if (user.lastSyncAt) {
       const minsSinceLastSync = (Date.now() - new Date(user.lastSyncAt).getTime()) / 60000;
-      if (minsSinceLastSync < 50) continue;
+      if (minsSinceLastSync < 10) continue;
     }
 
     try {

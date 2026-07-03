@@ -83,7 +83,7 @@ if (process.env.NODE_ENV === "production") {
   setTimeout(runTokenRefreshJob, 10000);
 
   // Sync automático — verifica a cada hora quem tem essa opção ativada
-  setInterval(runAutoSyncJob, 60 * 60 * 1000);
+  setInterval(runAutoSyncJob, 15 * 60 * 1000);
   setTimeout(runAutoSyncJob, 15000);
 }
 
