@@ -31,12 +31,32 @@ const SETTLEMENT_WINDOW_DAYS = 30; // janela de rechecagem, a partir da criaçã
 const INCREMENTAL_OVERLAP_MS = 5 * 60 * 1000; // margem de segurança contra corte exato no timestamp
 const SHIPMENT_TERMINAL_STATUSES = ["delivered", "not_delivered", "cancelled"];
 const SYNC_CADENCE_MINUTES = 15;
+const CONCURRENCY = 6; // quantos pedidos processar em paralelo por vez
 
 // Trava simples em memória — evita dois syncs simultâneos pro mesmo usuário
 const syncInProgress = new Set<number>();
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Roda fn sobre items em lotes de até `concurrency` em paralelo, com uma
+// pequena pausa entre lotes. Usado em qualquer processamento por-pedido
+// (busca de detalhe, enriquecimento) — troca "um de cada vez" por "N ao
+// mesmo tempo", sem paralelismo irrestrito (que arriscaria mais 429s).
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const chunk = items.slice(i, i + concurrency);
+    const chunkResults = await Promise.all(chunk.map(fn));
+    results.push(...chunkResults);
+    if (i + concurrency < items.length) await sleep(150);
+  }
+  return results;
 }
 
 // Wrapper com retry automático em caso de rate limit (429)
@@ -118,21 +138,36 @@ async function enrichAndUpsertOrder(
   let buyerCity: string | null = null;
   let buyerState: string | null = null;
 
-  try {
-    const billingRes = await mlGetWithRetry(mlClient, `/orders/${mlOrder.id}/billing_info`);
-    const info = billingRes.data?.billing_info?.additional_info ?? [];
-    const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
+  // Dados de comprador não mudam depois da venda — se já temos salvos,
+  // reaproveita em vez de bater na API de novo a cada passada.
+  const existingBuyer = await prisma.order.findUnique({
+    where: { mlId: String(mlOrder.id) },
+    select: { buyerName: true, buyerDocType: true, buyerDocNumber: true, buyerCity: true, buyerState: true },
+  });
 
-    const firstName = getField("FIRST_NAME");
-    const lastName = getField("LAST_NAME");
-    buyerName = [firstName, lastName].filter(Boolean).join(" ") || null;
-    buyerDocType = getField("DOC_TYPE");
-    buyerDocNumber = getField("DOC_NUMBER");
-    buyerCity = getField("CITY_NAME");
-    const stateCode = getField("STATE_CODE");
-    buyerState = stateCode ? stateCode.replace("BR-", "") : null;
-  } catch {
-    // Billing info pode não estar disponível para todos os pedidos
+  if (existingBuyer?.buyerName) {
+    buyerName = existingBuyer.buyerName;
+    buyerDocType = existingBuyer.buyerDocType;
+    buyerDocNumber = existingBuyer.buyerDocNumber;
+    buyerCity = existingBuyer.buyerCity;
+    buyerState = existingBuyer.buyerState;
+  } else {
+    try {
+      const billingRes = await mlGetWithRetry(mlClient, `/orders/${mlOrder.id}/billing_info`);
+      const info = billingRes.data?.billing_info?.additional_info ?? [];
+      const getField = (type: string) => info.find((f: any) => f.type === type)?.value ?? null;
+
+      const firstName = getField("FIRST_NAME");
+      const lastName = getField("LAST_NAME");
+      buyerName = [firstName, lastName].filter(Boolean).join(" ") || null;
+      buyerDocType = getField("DOC_TYPE");
+      buyerDocNumber = getField("DOC_NUMBER");
+      buyerCity = getField("CITY_NAME");
+      const stateCode = getField("STATE_CODE");
+      buyerState = stateCode ? stateCode.replace("BR-", "") : null;
+    } catch {
+      // Billing info pode não estar disponível para todos os pedidos
+    }
   }
 
   const netReceived = mlOrder.total_amount - mlFee - (shippingCost ?? 0);
@@ -263,13 +298,14 @@ async function processOrderBatch(mlClient: any, mlOrders: any[], userId: number,
   }
   const shipmentCache: Record<string, any> = {};
 
+  const results = await runWithConcurrency(mlOrders, CONCURRENCY, (mlOrder) =>
+    enrichAndUpsertOrder(mlClient, mlOrder, userId, tokenId, shipmentCache, shipmentOrderCount)
+  );
+
   let ordersNew = 0;
   let ordersUpdated = 0;
-
-  for (const mlOrder of mlOrders) {
-    const wasNew = await enrichAndUpsertOrder(mlClient, mlOrder, userId, tokenId, shipmentCache, shipmentOrderCount);
+  for (const wasNew of results) {
     if (wasNew) ordersNew++; else ordersUpdated++;
-    await sleep(100);
   }
 
   return { ordersNew, ordersUpdated };
@@ -395,16 +431,17 @@ async function runSettlementRecheck(mlClient: any, userId: number, tokenId: numb
 
   console.log(`[sync] tokenId ${tokenId} — rechecagem de assentamento: ${candidates.length} pedido(s) ainda em aberto na janela de ${SETTLEMENT_WINDOW_DAYS} dias`);
 
-  const freshOrders: any[] = [];
-  for (const c of candidates) {
+  const fetchResults = await runWithConcurrency(candidates, CONCURRENCY, async (c) => {
     try {
       const res = await mlGetWithRetry(mlClient, `/orders/${c.mlId}`);
-      freshOrders.push(res.data);
+      return res.data;
     } catch (err: any) {
       console.error(`[sync] Falha ao rechecar pedido ${c.mlId}:`, err?.message);
+      return null;
     }
-    await sleep(100);
-  }
+  });
+
+  const freshOrders = fetchResults.filter((o): o is any => o !== null);
 
   return processOrderBatch(mlClient, freshOrders, userId, tokenId);
 }
