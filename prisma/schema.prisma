@@ -83,16 +83,17 @@ model Subscription {
 }
 
 model Token {
-  id           Int      @id @default(autoincrement())
-  accessToken  String
-  refreshToken String
-  expiresAt    DateTime
-  userId       Int
-  apelido      String?
-  mlUserId     String?
-  mlNickname   String?
-  lastSyncAt      DateTime?               // NOVO
-  initialSyncDone Boolean  @default(false) // NOVO
+  id              Int       @id @default(autoincrement())
+  accessToken     String
+  refreshToken    String
+  expiresAt       DateTime
+  userId          Int
+  apelido         String?
+  mlUserId        String?
+  mlNickname      String?
+  lastSyncAt      DateTime?
+  initialSyncDone Boolean   @default(false)
+  syncStartedAt   DateTime?
 
   user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders           Order[]

@@ -428,6 +428,11 @@ export async function syncOrdersForUser(userId: number) {
       let errorMessage: string | null = null;
       let status = "success";
 
+      // Marca início — permite consultar "está rodando agora?" via /sync/status,
+      // sem depender de logs. Se o processo morrer no meio (deploy, crash), isso
+      // fica "preso" e o /sync/status classifica como "stalled" depois de um tempo.
+      await prisma.token.update({ where: { id: token.id }, data: { syncStartedAt: new Date() } }).catch(() => {});
+
       try {
         const validToken = await getValidToken(token.id);
         const mlClient = getMlClient(validToken.accessToken);
@@ -460,6 +465,12 @@ export async function syncOrdersForUser(userId: number) {
           ? JSON.stringify(err.response.data)
           : err?.message ?? "Sync error";
       }
+
+      // Limpa a marcação de início — o processamento desse token terminou
+      // (com sucesso ou falha tratada). Se isso não rodar (processo morto no
+      // meio), o campo fica "preso" propositalmente, para ser detectado como
+      // "stalled" pelo /sync/status.
+      await prisma.token.update({ where: { id: token.id }, data: { syncStartedAt: null } }).catch(() => {});
 
       const durationMs = Date.now() - start;
       await prisma.syncLog.create({

@@ -22,8 +22,48 @@ router.get("/", requireAuth, requireFuncionarioPermission("sync_ml"), async (req
 // GET /sync/status
 router.get("/status", requireAuth, async (req, res) => {
   const liderId = await getLiderId(req.user);
+
+  const tokens = await prisma.token.findMany({
+    where: { userId: liderId },
+    select: { id: true, apelido: true, mlNickname: true, initialSyncDone: true, lastSyncAt: true, syncStartedAt: true },
+  });
+
+  // Acima disso, uma marcação de "início" sem fim correspondente é tratada
+  // como processo interrompido (deploy, crash) — não "ainda rodando".
+  const STALE_MS = 10 * 60 * 60 * 1000;
+
+  const accounts = await Promise.all(
+    tokens.map(async (t) => {
+      const lastLog = await prisma.syncLog.findFirst({
+        where: { tokenId: t.id },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const runningMs = t.syncStartedAt ? Date.now() - t.syncStartedAt.getTime() : null;
+      const state: "idle" | "syncing" | "stalled" =
+        runningMs == null ? "idle" : runningMs < STALE_MS ? "syncing" : "stalled";
+
+      return {
+        tokenId: t.id,
+        nome: t.apelido ?? t.mlNickname,
+        state,
+        rodandoHaMinutos: state === "syncing" ? Math.round(runningMs! / 60000) : null,
+        initialSyncDone: t.initialSyncDone,
+        ultimaExecucao: lastLog
+          ? {
+              status: lastLog.status,
+              ordersNew: lastLog.ordersNew,
+              ordersUpdated: lastLog.ordersUpdated,
+              errorMessage: lastLog.errorMessage,
+              terminouEm: lastLog.createdAt,
+            }
+          : null,
+      };
+    })
+  );
+
   const lider = await prisma.user.findUnique({ where: { id: liderId }, select: { lastSyncAt: true } });
-  return res.json({ lastSyncAt: lider?.lastSyncAt });
+  return res.json({ lastSyncAt: lider?.lastSyncAt, accounts });
 });
 
 // GET /orders/sync/preview (Premium only) — inalterada, continua sendo um
