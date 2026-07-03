@@ -234,7 +234,10 @@ async function enrichAndUpsertOrder(
     const mlPaymentId = String(pay.id);
     let moneyReleaseDate = knownReleaseDates.get(mlPaymentId) ?? null;
 
-    if (!moneyReleaseDate) {
+    // Só confia na data já salva se ela já passou — uma data futura pode
+    // ter sido adiada, antecipada, ou o pagamento pode ter sido cancelado
+    // nesse meio tempo, então vale continuar checando até ela vencer.
+    if (!moneyReleaseDate || moneyReleaseDate > new Date()) {
       try {
         const payDetailRes = await mlGetWithRetry(mlClient, `/v1/payments/${pay.id}`, {
           baseURL: "https://api.mercadopago.com",
@@ -422,6 +425,10 @@ async function runSettlementRecheck(mlClient: any, userId: number, tokenId: numb
         { shipment: null },
         { shipment: { status: { notIn: SHIPMENT_TERMINAL_STATUSES } } },
         { payments: { some: { moneyReleaseDate: null } } },
+        // Data de liberação no futuro não significa que o dinheiro já caiu —
+        // só que já sabemos quando vai cair. Continua "não assentado" até
+        // essa data passar.
+        { payments: { some: { moneyReleaseDate: { gt: new Date() } } } },
       ],
     },
     select: { mlId: true },
