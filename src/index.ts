@@ -20,6 +20,8 @@ import shopeeRouter from "./routes/shopee";
 import { MercadoLivreAdapter } from "./sync/adapters/MercadoLivreAdapter";
 import { ShopeeAdapter } from "./sync/adapters/ShopeeAdapter";
 import { syncEngine } from "./sync/SyncEngine";
+import { runTier1Job, runTier2Job } from "./jobs/syncOrchestrator";
+
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -77,14 +79,23 @@ app.listen(PORT, () => {
   console.log(`   CORS allowed: ${allowedOrigins.join(", ")}`);
 });
 
-// ─── ALERT CRON (every hour) ──────────────────────────────────────────────────
+// ─── SYNC CRONS (production only) ────────────────────────────────────────────
 if (process.env.NODE_ENV === "production") {
+  // Alertas — a cada hora
   setInterval(runAlertJob, 60 * 60 * 1000);
   setTimeout(runAlertJob, 5000);
 
+  // Refresh de tokens ML antigos (tabela Token) — a cada 5h
   setInterval(runTokenRefreshJob, 5 * 60 * 60 * 1000);
   setTimeout(runTokenRefreshJob, 10000);
 
+  // Tier 1 — descoberta incremental — a cada 15 min
+  setInterval(runTier1Job, 15 * 60 * 1000);
+  setTimeout(runTier1Job, 20000); // primeira execução 20s após o boot
+
+  // Tier 2 — recheck de assentamento — a cada 5 min
+  setInterval(runTier2Job, 5 * 60 * 1000);
+  setTimeout(runTier2Job, 30000); // primeira execução 30s após o boot
 }
 
 export default app;

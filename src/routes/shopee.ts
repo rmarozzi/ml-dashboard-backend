@@ -10,6 +10,8 @@ import axios from "axios";
 import prisma from "../lib/prisma";
 import { requireAuth } from "../middlewares/auth";
 import { encrypt } from "../lib/crypto";
+import { triggerBackfillAsync } from "../jobs/syncOrchestrator";
+
 
 const router = Router();
 
@@ -155,6 +157,20 @@ router.get("/callback", async (req, res) => {
         externalNickname,
       },
     });
+	
+	// ... após o upsert bem-sucedido:
+const account = await prisma.channelAccount.findUnique({
+  where: {
+    userId_channelType_externalAccountId: {
+      userId:            verified.userId,
+      channelType:       "SHOPEE",
+      externalAccountId: shop_id,
+    },
+  },
+});
+if (account && !account.initialSyncDone) {
+  triggerBackfillAsync(account.id);
+}
 
     // Redireciona pro frontend com sucesso
     const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000";
