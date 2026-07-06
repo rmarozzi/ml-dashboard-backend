@@ -110,6 +110,7 @@ model ChannelAccount {
   updatedAt         DateTime    @updatedAt
 
   user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders        Order[]            // ← adicionar esta linha
   syncLogs      SyncExecutionLog[]
 
   @@unique([userId, channelType, externalAccountId])
@@ -194,66 +195,74 @@ model PlanChange {
 // ─── PEDIDOS ──────────────────────────────────────────────────────────────────
 
 model Order {
-  id               Int      @id @default(autoincrement())
-  mlId             String   @unique
+  id               Int          @id @default(autoincrement())
+  externalOrderId  String       @unique  // ← novo (substitui mlId no longo prazo)
+  mlId             String?              // ← vira opcional (compatibilidade)
+  channelAccountId String?              // ← novo FK para ChannelAccount
+  channelType      ChannelType? @default(MERCADO_LIVRE) // ← novo
   packId           String?
   status           String
   totalAmount      Float
   netReceived      Float?
-  taxesAmount      Float    @default(0)
+  taxesAmount      Float        @default(0)
   shippingCost     Float?
-  shippingDiscount Float    @default(0)
+  shippingDiscount Float        @default(0)
   buyerName        String?
   buyerDocType     String?
   buyerDocNumber   String?
   buyerCity        String?
   buyerState       String?
   dateCreated      DateTime
+  dateLastUpdated  DateTime?            // ← novo
   userId           Int
-  tokenId          Int
+  tokenId          Int?                 // ← vira opcional (compatibilidade)
 
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token    Token     @relation(fields: [tokenId], references: [id])
-  items    Item[]
-  payments Payment[]
-  shipment Shipment?
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token          Token?          @relation(fields: [tokenId], references: [id])
+  channelAccount ChannelAccount? @relation(fields: [channelAccountId], references: [id])
+  items          Item[]
+  payments       Payment[]
+  shipment       Shipment?
 }
 
 model Item {
-  id       Int     @id @default(autoincrement())
-  orderId  Int
-  mlItemId String?
-  title    String
-  quantity Int
-  unitPrice Float
-  sku      String?
-  saleFee  Float   @default(0)
+  id             Int     @id @default(autoincrement())
+  orderId        Int
+  externalItemId String?  // ← novo
+  mlItemId       String?
+  title          String
+  quantity       Int
+  unitPrice      Float
+  sku            String?
+  saleFee        Float   @default(0)
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
 model Payment {
-  id               Int       @id @default(autoincrement())
-  orderId          Int
-  mlPaymentId      String?   @unique
-  status           String
-  totalPaidAmount  Float
-  taxesAmount      Float     @default(0)
-  operationType    String    @default("regular_payment")
-  paymentMethodId  String?
-  moneyReleaseDate DateTime?
+  id                Int       @id @default(autoincrement())
+  orderId           Int
+  externalPaymentId String?   @unique  // ← novo (substitui mlPaymentId)
+  mlPaymentId       String?            // ← mantido por compatibilidade
+  status            String
+  totalPaidAmount   Float
+  taxesAmount       Float     @default(0)
+  operationType     String    @default("regular_payment")
+  paymentMethodId   String?
+  moneyReleaseDate  DateTime?
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
 model Shipment {
-  id             Int      @id @default(autoincrement())
-  orderId        Int      @unique
-  mlShipmentId   String?
-  status         String
-  trackingNumber String?
-  cost           Float?
-  dateCreated    DateTime @default(now())
+  id                 Int      @id @default(autoincrement())
+  orderId            Int      @unique
+  externalShipmentId String?  // ← novo (substitui mlShipmentId)
+  mlShipmentId       String?  // ← mantido por compatibilidade
+  status             String
+  trackingNumber     String?
+  cost               Float?
+  dateCreated        DateTime @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
