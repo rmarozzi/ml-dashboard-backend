@@ -14,6 +14,7 @@ import {
 
 export class SyncEngine {
   private adapters = new Map<string, ChannelSyncAdapter>();
+  private backfillInProgress = new Set<string>();
 
   // ─── REGISTRO DE ADAPTERS ───────────────────────────────────────────────────
 
@@ -35,6 +36,12 @@ export class SyncEngine {
   // ─── TIER 0 — BACKFILL HISTÓRICO ───────────────────────────────────────────
 
   async runBackfill(account: ChannelAccount, since?: Date): Promise<void> {
+    if (this.backfillInProgress.has(account.id)) {
+      console.log(`[SyncEngine][Tier0] Backfill já em andamento para conta ${account.id} — ignorando.`);
+      return;
+    }
+    this.backfillInProgress.add(account.id);
+
     const adapter = this.getAdapter(account);
     const logId = await this.startLog(account.id, 0);
 
@@ -57,7 +64,6 @@ export class SyncEngine {
 
       await this.finishLog(logId, SyncStatus.SUCCESS, { ordersFound, ordersUpserted });
 
-      // Marca backfill como concluído na conta
       await prisma.channelAccount.update({
         where: { id: account.id },
         data: { initialSyncDone: true, lastSyncAt: new Date() },
@@ -74,6 +80,8 @@ export class SyncEngine {
         errorDetail: err?.message,
       });
       throw err;
+    } finally {
+      this.backfillInProgress.delete(account.id);
     }
   }
 
@@ -131,7 +139,6 @@ export class SyncEngine {
   async runSettlementRecheck(account: ChannelAccount): Promise<void> {
     const adapter = this.getAdapter(account);
 
-    // Busca pedidos dos últimos 30 dias com pagamento não assentado
     const window30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const now = new Date();
 
@@ -188,7 +195,6 @@ export class SyncEngine {
     for (const order of orders) {
       try {
         await prisma.$transaction(async (tx) => {
-          // Upsert do pedido principal
           const saved = await tx.order.upsert({
             where: { externalOrderId: order.externalOrderId },
             create: {
@@ -212,32 +218,31 @@ export class SyncEngine {
               packId:           order.packId,
             },
             update: {
-              status:          order.status,
-              dateLastUpdated: order.dateLastUpdated,
-              netReceived:     order.netReceived,
-              taxesAmount:     order.taxesAmount,
-              shippingCost:    order.shippingCost,
-              shippingDiscount:order.shippingDiscount,
-              buyerName:       order.buyerName ?? undefined,
-              buyerCity:       order.buyerCity,
-              buyerState:      order.buyerState,
+              status:           order.status,
+              dateLastUpdated:  order.dateLastUpdated,
+              netReceived:      order.netReceived,
+              taxesAmount:      order.taxesAmount,
+              shippingCost:     order.shippingCost,
+              shippingDiscount: order.shippingDiscount,
+              buyerName:        order.buyerName ?? undefined,
+              buyerCity:        order.buyerCity,
+              buyerState:       order.buyerState,
             },
           });
 
-          // Upsert dos pagamentos
           for (const payment of order.payments) {
             if (!payment.externalPaymentId) continue;
             await tx.payment.upsert({
               where: { externalPaymentId: payment.externalPaymentId },
               create: {
-                orderId:          saved.id,
-                externalPaymentId:payment.externalPaymentId,
-                status:           payment.status,
-                totalPaidAmount:  payment.totalPaidAmount,
-                taxesAmount:      payment.taxesAmount,
-                operationType:    payment.operationType,
-                paymentMethodId:  payment.paymentMethodId,
-                moneyReleaseDate: payment.moneyReleaseDate,
+                orderId:           saved.id,
+                externalPaymentId: payment.externalPaymentId,
+                status:            payment.status,
+                totalPaidAmount:   payment.totalPaidAmount,
+                taxesAmount:       payment.taxesAmount,
+                operationType:     payment.operationType,
+                paymentMethodId:   payment.paymentMethodId,
+                moneyReleaseDate:  payment.moneyReleaseDate,
               },
               update: {
                 status:           payment.status,
@@ -247,7 +252,6 @@ export class SyncEngine {
             });
           }
 
-          // Upsert dos itens (delete + insert — itens não mudam após criação)
           if (order.items.length > 0) {
             const existing = await tx.item.count({ where: { orderId: saved.id } });
             if (existing === 0) {
@@ -265,7 +269,6 @@ export class SyncEngine {
             }
           }
 
-          // Upsert do envio
           if (order.shipment) {
             await tx.shipment.upsert({
               where: { orderId: saved.id },
@@ -335,5 +338,4 @@ export class SyncEngine {
   }
 }
 
-// Singleton exportado — importado pelos crons e pelo adapter ML
 export const syncEngine = new SyncEngine();

@@ -1,7 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { requireAuth, requireFuncionarioPermission, requirePlan } from "../middlewares/auth";
-import { filterMlAccounts } from "../lib/filterMlAccounts";
 import { calculateOrderProfit } from "../lib/profit";
 
 const router = Router();
@@ -14,64 +13,56 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_orders"), async 
     onlyMissingCost,
   } = req.query as Record<string, string>;
 
-  const tokenIds = await filterMlAccounts(req.user);
+  const liderId = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
   const canViewProfit = req.user.role === "admin" || req.user.subscription?.plan?.canViewProfit;
 
-  const where: any = { tokenId: { in: tokenIds } };
+  const where: any = { userId: liderId };
   if (status) where.status = status;
-if (search) {
-  where.OR = [
-    { mlId: { contains: search, mode: "insensitive" } },
-    { packId: { contains: search, mode: "insensitive" } },
-    { items: { some: { title: { contains: search, mode: "insensitive" } } } },
-  ];
-}
+  if (search) {
+    where.OR = [
+      { externalOrderId: { contains: search, mode: "insensitive" } },
+      { mlId: { contains: search, mode: "insensitive" } },
+      { packId: { contains: search, mode: "insensitive" } },
+      { items: { some: { title: { contains: search, mode: "insensitive" } } } },
+    ];
+  }
 
   const pageNum = parseInt(page);
   const limitNum = Math.min(parseInt(limit) || 50, 200);
   const skip = (pageNum - 1) * limitNum;
 
-  const dbSortFields = ["mlId", "totalAmount", "dateCreated", "status"];
+  const dbSortFields = ["externalOrderId", "totalAmount", "dateCreated", "status"];
   const orderBy: any = dbSortFields.includes(sortField)
     ? { [sortField]: sortDir === "asc" ? "asc" : "desc" }
     : { dateCreated: "desc" };
 
-  // ── Filtro "sem custo cadastrado" aplicado ANTES da paginação ──────────────
+  // ── Filtro "sem custo cadastrado" ────────────────────────────────────────────
   if (onlyMissingCost === "true" && canViewProfit) {
-    // Busca todos os IDs de pedidos que batem no filtro base (status/search/tokenIds)
     const candidateOrders = await prisma.order.findMany({
       where,
       select: { id: true, dateCreated: true, items: { select: { sku: true } } },
     });
 
-    // Pega todos os SKUs únicos do usuário que JÁ têm custo cadastrado
-    const liderIdForCosts = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
     const registeredCosts = await prisma.productCost.findMany({
-      where: { userId: liderIdForCosts },
+      where: { userId: liderId },
       select: { sku: true },
       distinct: ["sku"],
     });
     const registeredSkuSet = new Set(registeredCosts.map((c) => c.sku));
 
-    // Um pedido está "sem custo" se algum item não tem SKU OU o SKU não está cadastrado
     const missingCostOrderIds = candidateOrders
-      .filter((o) =>
-        o.items.some((i) => !i.sku || !registeredSkuSet.has(i.sku))
-      )
+      .filter((o) => o.items.some((i) => !i.sku || !registeredSkuSet.has(i.sku)))
       .map((o) => o.id);
 
     const missingCostTotal = missingCostOrderIds.length;
-
-    // Pagina apenas dentro do conjunto de pedidos sem custo
     where.id = { in: missingCostOrderIds };
 
-    const total = missingCostTotal;
     const orders = await prisma.order.findMany({
       where,
       include: {
         items: true,
         payments: true,
-        token: { select: { apelido: true, mlNickname: true } },
+        channelAccount: { select: { apelido: true, externalNickname: true, channelType: true } },
       },
       orderBy,
       skip,
@@ -83,6 +74,10 @@ if (search) {
         const p = await calculateOrderProfit(order.id);
         return {
           ...order,
+          token: {
+            apelido: order.channelAccount?.apelido ?? order.channelAccount?.externalNickname ?? null,
+            mlNickname: order.channelAccount?.externalNickname ?? null,
+          },
           profit: p ? Math.round(p.profit * 100) / 100 : null,
           margin: p ? p.margin : null,
           mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
@@ -99,15 +94,15 @@ if (search) {
 
     return res.json({
       orders: ordersWithProfit,
-      total,
+      total: missingCostTotal,
       page: pageNum,
       limit: limitNum,
-      totalPages: Math.ceil(total / limitNum),
+      totalPages: Math.ceil(missingCostTotal / limitNum),
       missingCostTotal,
     });
   }
 
-  // ── Fluxo normal (sem filtro de custo) ──────────────────────────────────────
+  // ── Fluxo normal ─────────────────────────────────────────────────────────────
   const total = await prisma.order.count({ where });
 
   const orders = await prisma.order.findMany({
@@ -115,7 +110,7 @@ if (search) {
     include: {
       items: true,
       payments: true,
-      token: { select: { apelido: true, mlNickname: true } },
+      channelAccount: { select: { apelido: true, externalNickname: true, channelType: true } },
     },
     orderBy,
     skip,
@@ -124,16 +119,22 @@ if (search) {
 
   const ordersWithProfit = await Promise.all(
     orders.map(async (order) => {
+      const baseOrder = {
+        ...order,
+        token: {
+          apelido: order.channelAccount?.apelido ?? order.channelAccount?.externalNickname ?? null,
+          mlNickname: order.channelAccount?.externalNickname ?? null,
+        },
+        missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
+      };
+
       if (!canViewProfit) {
-        return {
-          ...order,
-          profit: null, margin: null,
-          missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
-        };
+        return { ...baseOrder, profit: null, margin: null, allCostsFound: true };
       }
+
       const p = await calculateOrderProfit(order.id);
       return {
-        ...order,
+        ...baseOrder,
         profit: p ? Math.round(p.profit * 100) / 100 : null,
         margin: p ? p.margin : null,
         mlFee: p ? Math.round(p.mlFee * 100) / 100 : null,
@@ -143,21 +144,19 @@ if (search) {
         productCost: p ? Math.round(p.productCost * 100) / 100 : null,
         estorno: p ? Math.round(p.estorno * 100) / 100 : null,
         allCostsFound: p ? p.allCostsFound : false,
-        missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
       };
     })
   );
 
-  // Calcula o total geral de pedidos sem custo (para o badge do botão, sem filtro ativo)
+  // Badge de pedidos sem custo
   let missingCostTotal = 0;
   if (canViewProfit) {
-    const liderIdForCosts = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
     const allOrdersBase = await prisma.order.findMany({
-      where: { tokenId: { in: tokenIds } },
+      where: { userId: liderId },
       select: { id: true, items: { select: { sku: true } } },
     });
     const registeredCosts = await prisma.productCost.findMany({
-      where: { userId: liderIdForCosts },
+      where: { userId: liderId },
       select: { sku: true },
       distinct: ["sku"],
     });
@@ -180,15 +179,19 @@ if (search) {
 // GET /profit/orders
 router.get("/profit", requireAuth, requirePlan("prata"), requireFuncionarioPermission("view_profit"), async (req, res) => {
   const { from, to } = req.query as Record<string, string>;
-  const tokenIds = await filterMlAccounts(req.user);
+  const liderId = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
 
-  const where: any = { tokenId: { in: tokenIds } };
+  const where: any = { userId: liderId };
   if (from) where.dateCreated = { ...where.dateCreated, gte: new Date(from) };
   if (to) where.dateCreated = { ...where.dateCreated, lte: new Date(to) };
 
   const orders = await prisma.order.findMany({
     where,
-    include: { items: true, payments: true, token: { select: { apelido: true } } },
+    include: {
+      items: true,
+      payments: true,
+      channelAccount: { select: { apelido: true, externalNickname: true } },
+    },
     orderBy: { dateCreated: "desc" },
     take: 500,
   });
@@ -196,7 +199,13 @@ router.get("/profit", requireAuth, requirePlan("prata"), requireFuncionarioPermi
   const result = await Promise.all(
     orders.map(async (o) => {
       const profit = await calculateOrderProfit(o.id);
-      return { ...o, ...profit };
+      return {
+        ...o,
+        token: {
+          apelido: o.channelAccount?.apelido ?? o.channelAccount?.externalNickname ?? null,
+        },
+        ...profit,
+      };
     })
   );
 

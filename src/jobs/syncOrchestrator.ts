@@ -10,8 +10,35 @@
 import prisma from "../lib/prisma";
 import { syncEngine } from "../sync/SyncEngine";
 
+// ─── TIER 0 — BACKFILL (disparado na conexão de nova conta) ──────────────────
+// Chamado diretamente pelas rotas de OAuth (ML e Shopee) após criação da conta.
+// Roda em background sem bloquear a resposta HTTP.
+
+const backfillQueued = new Set<string>();
+
+export function triggerBackfillAsync(channelAccountId: string): void {
+  if (backfillQueued.has(channelAccountId)) {
+    console.log(`[Orchestrator] Backfill já enfileirado para conta ${channelAccountId} — ignorando.`);
+    return;
+  }
+  backfillQueued.add(channelAccountId);
+
+  prisma.channelAccount
+    .findUnique({ where: { id: channelAccountId } })
+    .then(async (account) => {
+      if (!account) return;
+      console.log(`[Tier0] Iniciando backfill para conta ${channelAccountId}...`);
+      await syncEngine.runBackfill(account);
+    })
+    .catch((err) => {
+      console.error(`[Tier0] Erro no backfill da conta ${channelAccountId}:`, err?.message);
+    })
+    .finally(() => {
+      backfillQueued.delete(channelAccountId);
+    });
+}
+
 // ─── CONCORRÊNCIA CONTROLADA ──────────────────────────────────────────────────
-// Evita sobrecarregar o banco e as APIs com muitas contas em paralelo.
 
 async function runWithConcurrency<T>(
   items: T[],
@@ -77,21 +104,4 @@ export async function runTier2Job(): Promise<void> {
   });
 
   console.log("[Tier2] Concluído.");
-}
-
-// ─── TIER 0 — BACKFILL (disparado na conexão de nova conta) ──────────────────
-// Chamado diretamente pelas rotas de OAuth (ML e Shopee) após criação da conta.
-// Roda em background sem bloquear a resposta HTTP.
-
-export function triggerBackfillAsync(channelAccountId: string): void {
-  prisma.channelAccount
-    .findUnique({ where: { id: channelAccountId } })
-    .then(async (account) => {
-      if (!account) return;
-      console.log(`[Tier0] Iniciando backfill para conta ${channelAccountId}...`);
-      await syncEngine.runBackfill(account);
-    })
-    .catch((err) => {
-      console.error(`[Tier0] Erro no backfill da conta ${channelAccountId}:`, err?.message);
-    });
 }
