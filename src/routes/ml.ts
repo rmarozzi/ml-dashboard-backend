@@ -9,18 +9,19 @@ router.get("/status", requireAuth, async (req, res) => {
   const liderId = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
 
   const accounts = await prisma.channelAccount.findMany({
-    where: { userId: liderId, channelType: "MERCADO_LIVRE" },
-    select: {
-      id:               true,
-      externalAccountId:true,
-      externalNickname: true,
-      apelido:          true,
-      initialSyncDone:  true,
-      lastSyncAt:       true,
-      tokenExpiresAt:   true,
-      createdAt:        true,
-    },
-  });
+  where: { userId: liderId, channelType: "MERCADO_LIVRE" },
+  select: {
+    id:                true,
+    channelType:       true,  // ← adicionar esta linha
+    externalAccountId: true,
+    externalNickname:  true,
+    apelido:           true,
+    initialSyncDone:   true,
+    lastSyncAt:        true,
+    tokenExpiresAt:    true,
+    createdAt:         true,
+  },
+});
 
   return res.json({
     accounts: accounts.map((a) => ({
