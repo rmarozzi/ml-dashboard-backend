@@ -1,11 +1,13 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
+import axios from "axios";
 import prisma from "../lib/prisma";
 import { signToken } from "../lib/jwt";
 import { requireAuth } from "../middlewares/auth";
 import { buildOAuthUrl, exchangeCode } from "../lib/ml";
-import axios from "axios";
+import { encrypt } from "../lib/crypto";
+import { triggerBackfillAsync } from "../jobs/syncOrchestrator";
 
 const router = Router();
 
@@ -75,14 +77,13 @@ router.post("/change-password", requireAuth, async (req, res) => {
 
   const hash = await bcrypt.hash(newPassword, 12);
   await prisma.user.update({ where: { id: req.user.id }, data: { password: hash } });
-  // Invalidate all other sessions
   await prisma.session.deleteMany({
     where: { userId: req.user.id, token: { not: req.sessionToken } },
   });
   return res.json({ ok: true });
 });
 
-// POST /auth/register (bootstrap - protected by ADMIN_SECRET)
+// POST /auth/register (bootstrap — protegido por ADMIN_SECRET)
 router.post("/register", async (req, res) => {
   const { secret, email, password, name } = req.body;
   if (secret !== process.env.ADMIN_SECRET) return res.status(403).json({ message: "Forbidden" });
@@ -98,32 +99,57 @@ router.post("/register", async (req, res) => {
   return res.status(201).json({ user: safeUser });
 });
 
-// GET /auth/ml-url
+// GET /auth/ml-url — gera URL de autorização do ML com state assinado
 router.get("/ml-url", requireAuth, (req, res) => {
-  const state = Buffer.from(JSON.stringify({
-    userId: req.user.id,
-    frontendUrl: process.env.FRONTEND_URL,
-  })).toString("base64");
+  // State assinado com HMAC — evita account hijacking
+  const payload = `${req.user.id}:${Date.now()}`;
+  const sig = crypto
+    .createHmac("sha256", process.env.TOKEN_ENCRYPTION_KEY!)
+    .update(payload)
+    .digest("hex");
+  const state = Buffer.from(`${payload}:${sig}`).toString("base64url");
   const url = buildOAuthUrl(state);
   return res.json({ url });
 });
 
-// GET /auth/callback (ML OAuth callback)
+// GET /auth/callback — callback OAuth do Mercado Livre
 router.get("/callback", async (req, res) => {
   const { code, state } = req.query as { code: string; state: string };
   if (!code || !state) return res.status(400).json({ message: "Parâmetros inválidos" });
 
-  let decoded: any;
+  // Valida state assinado
+  let userId: number;
   try {
-    decoded = JSON.parse(Buffer.from(state, "base64").toString());
-  } catch {
-    return res.status(400).json({ message: "State inválido" });
+    const decoded = Buffer.from(state, "base64url").toString("utf8");
+    const parts = decoded.split(":");
+    if (parts.length !== 3) throw new Error("formato inválido");
+
+    const [userIdStr, tsStr, sig] = parts;
+    const payload = `${userIdStr}:${tsStr}`;
+    const expected = crypto
+      .createHmac("sha256", process.env.TOKEN_ENCRYPTION_KEY!)
+      .update(payload)
+      .digest("hex");
+
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+      throw new Error("assinatura inválida");
+    }
+
+    // State válido por 10 minutos
+    if (Date.now() - parseInt(tsStr) > 10 * 60 * 1000) {
+      throw new Error("state expirado");
+    }
+
+    userId = parseInt(userIdStr);
+  } catch (err: any) {
+    return res.status(400).json({ message: `State inválido: ${err?.message}` });
   }
 
+  // Troca code por tokens
   const tokens = await exchangeCode(code);
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
 
-  // Fetch ML user info
+  // Busca informações do seller no ML
   let mlUserId: string | null = null;
   let mlNickname: string | null = null;
   try {
@@ -134,18 +160,43 @@ router.get("/callback", async (req, res) => {
     mlNickname = mlRes.data.nickname;
   } catch {}
 
-  await prisma.token.create({
-    data: {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      expiresAt,
-      userId: decoded.userId,
-      mlUserId,
-      mlNickname,
+  if (!mlUserId) {
+    return res.status(502).json({ message: "Não foi possível obter dados do seller no ML." });
+  }
+
+  // Cria ou atualiza ChannelAccount (upsert — reconexão não duplica)
+  const account = await prisma.channelAccount.upsert({
+    where: {
+      userId_channelType_externalAccountId: {
+        userId,
+        channelType:       "MERCADO_LIVRE",
+        externalAccountId: mlUserId,
+      },
+    },
+    create: {
+      userId,
+      channelType:       "MERCADO_LIVRE",
+      externalAccountId: mlUserId,
+      accessTokenEnc:    encrypt(tokens.access_token),
+      refreshTokenEnc:   encrypt(tokens.refresh_token),
+      tokenExpiresAt:    expiresAt,
+      externalNickname:  mlNickname,
+      apelido:           mlNickname,
+    },
+    update: {
+      accessTokenEnc:   encrypt(tokens.access_token),
+      refreshTokenEnc:  encrypt(tokens.refresh_token),
+      tokenExpiresAt:   expiresAt,
+      externalNickname: mlNickname ?? undefined,
     },
   });
 
-  const frontendUrl = decoded.frontendUrl || process.env.FRONTEND_URL || "http://localhost:3000";
+  // Dispara backfill em background se ainda não foi feito
+  if (!account.initialSyncDone) {
+    triggerBackfillAsync(account.id);
+  }
+
+  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
   return res.redirect(`${frontendUrl}/dashboard/profile?ml=connected`);
 });
 
