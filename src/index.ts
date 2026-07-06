@@ -15,7 +15,11 @@ import subscriptionRouter from "./routes/subscription";
 import exportRouter from "./routes/export";
 import adminRouter from "./routes/admin";
 import { runAlertJob } from "./jobs/alerts";
-import { runTokenRefreshJob } from "./lib/ml";
+import { runTokenRefreshJob } from "./lib/ml";// imports novos (adicionar junto com os outros imports)
+import shopeeRouter from "./routes/shopee";
+import { MercadoLivreAdapter } from "./sync/adapters/MercadoLivreAdapter";
+import { ShopeeAdapter } from "./sync/adapters/ShopeeAdapter";
+import { syncEngine } from "./sync/SyncEngine";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -56,13 +60,16 @@ app.use("/settings", settingsRouter);
 app.use("/subscription", subscriptionRouter);
 app.use("/export", exportRouter);
 app.use("/admin", adminRouter);
+app.use("/shopee", shopeeRouter);
+
 
 // ─── ERROR HANDLER ────────────────────────────────────────────────────────────
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("[Error]", err?.message ?? err);
   res.status(err.status ?? 500).json({ message: err.message ?? "Erro interno" });
 });
-
+syncEngine.registerAdapter(new MercadoLivreAdapter());
+syncEngine.registerAdapter(new ShopeeAdapter());
 // ─── START ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port ${PORT}`);
