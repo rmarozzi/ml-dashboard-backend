@@ -21,6 +21,7 @@ import { MercadoLivreAdapter } from "./sync/adapters/MercadoLivreAdapter";
 import { ShopeeAdapter } from "./sync/adapters/ShopeeAdapter";
 import { syncEngine } from "./sync/SyncEngine";
 import { runTier1Job, runTier2Job } from "./jobs/syncOrchestrator";
+import channelsRouter from "./routes/channels";
 
 
 const app = express();
@@ -63,6 +64,7 @@ app.use("/subscription", subscriptionRouter);
 app.use("/export", exportRouter);
 app.use("/admin", adminRouter);
 app.use("/shopee", shopeeRouter);
+app.use("/channels", channelsRouter);
 
 
 // ─── ERROR HANDLER ────────────────────────────────────────────────────────────
