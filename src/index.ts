@@ -20,9 +20,10 @@ import shopeeRouter from "./routes/shopee";
 import { MercadoLivreAdapter } from "./sync/adapters/MercadoLivreAdapter";
 import { ShopeeAdapter } from "./sync/adapters/ShopeeAdapter";
 import { syncEngine } from "./sync/SyncEngine";
-import { runTier1Job, runTier2Job } from "./jobs/syncOrchestrator";
+import { runTier1Job, runTier2Job, triggerBackfillAsync } from "./jobs/syncOrchestrator";
 import channelsRouter from "./routes/channels";
 import prisma from "./lib/prisma";
+
 
 
 
