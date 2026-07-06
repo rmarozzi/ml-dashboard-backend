@@ -22,6 +22,8 @@ import { ShopeeAdapter } from "./sync/adapters/ShopeeAdapter";
 import { syncEngine } from "./sync/SyncEngine";
 import { runTier1Job, runTier2Job } from "./jobs/syncOrchestrator";
 import channelsRouter from "./routes/channels";
+import prisma from "./lib/prisma";
+
 
 
 const app = express();
@@ -74,11 +76,32 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 syncEngine.registerAdapter(new MercadoLivreAdapter());
 syncEngine.registerAdapter(new ShopeeAdapter());
+
+// ─── RETOMA BACKFILLS PENDENTES NO BOOT ───────────────────────────────────────
+async function resumePendingBackfills(): Promise<void> {
+  try {
+    const pending = await prisma.channelAccount.findMany({
+      where: { initialSyncDone: false },
+    });
+
+    if (pending.length === 0) return;
+
+    console.log(`[Boot] ${pending.length} conta(s) com backfill pendente — retomando...`);
+    for (const account of pending) {
+      triggerBackfillAsync(account.id);
+    }
+  } catch (err: any) {
+    console.error("[Boot] Erro ao verificar backfills pendentes:", err?.message);
+  }
+}
 // ─── START ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port ${PORT}`);
   console.log(`   NODE_ENV: ${process.env.NODE_ENV || "development"}`);
   console.log(`   CORS allowed: ${allowedOrigins.join(", ")}`);
+  
+  // Retoma backfills que foram interrompidos por deploys
+  resumePendingBackfills();
 });
 
 // ─── SYNC CRONS (production only) ────────────────────────────────────────────
