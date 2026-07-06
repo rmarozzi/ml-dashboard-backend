@@ -4,7 +4,6 @@ import cookieParser from "cookie-parser";
 import "dotenv/config";
 
 import authRouter from "./routes/auth";
-import syncRouter from "./routes/sync";
 import dashboardRouter from "./routes/dashboard";
 import ordersRouter from "./routes/orders";
 import shipmentsRouter from "./routes/shipments";
@@ -17,7 +16,6 @@ import exportRouter from "./routes/export";
 import adminRouter from "./routes/admin";
 import { runAlertJob } from "./jobs/alerts";
 import { runTokenRefreshJob } from "./lib/ml";
-import { runAutoSyncJob } from "./jobs/autoSync";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -47,8 +45,6 @@ app.get("/health", (_, res) => res.json({ ok: true, ts: new Date().toISOString()
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.use("/auth", authRouter);
-app.use("/orders/sync", syncRouter);         // /orders/sync, /orders/sync/preview
-app.use("/sync", syncRouter);               // /sync/status
 app.use("/dashboard", dashboardRouter);
 app.use("/orders", ordersRouter);
 app.use("/profit", ordersRouter);           // /profit/orders
@@ -82,9 +78,6 @@ if (process.env.NODE_ENV === "production") {
   setInterval(runTokenRefreshJob, 5 * 60 * 60 * 1000);
   setTimeout(runTokenRefreshJob, 10000);
 
-  // Sync automático — verifica a cada hora quem tem essa opção ativada
-  setInterval(runAutoSyncJob, 15 * 60 * 1000);
-  setTimeout(runAutoSyncJob, 15000);
 }
 
 export default app;
