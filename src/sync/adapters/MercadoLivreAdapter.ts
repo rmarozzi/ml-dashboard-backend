@@ -105,7 +105,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const res = await http.get("/orders/search", {
         params: {
           seller: account.externalAccountId,
-          sort: "date_desc",
+          sort:   "date_desc",
           offset,
           limit,
         },
@@ -144,7 +144,8 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
       const res = await http.get("/orders/search", {
         params: {
-          seller:                         account.externalAccountId,
+          // sem "seller" — o token já identifica o seller
+          // passar seller junto com filtros de data causa erro 400
           "order.date_last_updated.from": since.toISOString(),
           "order.date_last_updated.to":   until.toISOString(),
           sort:                           "date_last_updated_asc",
@@ -188,8 +189,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── BUSCA DETALHES EM LOTE ──────────────────────────────────────────────────
-  // /orders/search retorna resumo — /orders?ids=... retorna dados completos
-  // incluindo shipping.receiver_address, billing_info e payments detalhados
 
   private async fetchOrderDetails(
     http: ReturnType<typeof this.client>,
@@ -228,7 +227,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     account: ChannelAccount,
     http: ReturnType<typeof this.client>
   ): Promise<NormalizedOrder[]> {
-    // Busca detalhes completos em lote para ter shipping, billing_info, payments
     const orderIds = raws.map((r) => String(r.id));
     const detailedOrders = await this.fetchOrderDetails(http, orderIds);
 
@@ -239,7 +237,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
     const results: NormalizedOrder[] = [];
     for (const raw of raws) {
-      // Usa detalhes completos se disponível, senão usa o resumo
       const detailed = detailMap.get(String(raw.id)) ?? raw;
       const normalized = await this.normalizeSingle(detailed, account);
       if (normalized) results.push(normalized);
