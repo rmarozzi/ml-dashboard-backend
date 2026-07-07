@@ -1,8 +1,4 @@
 // src/sync/adapters/MercadoLivreAdapter.ts
-//
-// Adapter do Mercado Livre para o SyncEngine.
-// Encapsula toda a lógica específica do ML: paginação por offset,
-// limite de 10k registros, rateio de frete por pack, refresh de token.
 
 import { encrypt, decrypt } from "../../lib/crypto";
 import axios from "axios";
@@ -144,8 +140,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
       const res = await http.get("/orders/search", {
         params: {
-          // sem "seller" — o token já identifica o seller
-          // passar seller junto com filtros de data causa erro 400
           "order.date_last_updated.from": since.toISOString(),
           "order.date_last_updated.to":   until.toISOString(),
           sort:                           "date_last_updated_asc",
@@ -178,7 +172,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     for (const orderId of externalOrderIds) {
       try {
         const res = await http.get(`/orders/${orderId}`);
-        const normalized = await this.normalizeSingle(res.data, account);
+        const normalized = await this.normalizeSingle(res.data, account, http);
         if (normalized) results.push(normalized);
       } catch (err: any) {
         console.error(`[ML][Tier2] Erro ao buscar pedido ${orderId}:`, err?.message);
@@ -189,6 +183,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── BUSCA DETALHES EM LOTE ──────────────────────────────────────────────────
+  // /orders/search retorna resumo — /orders?ids=... retorna dados completos
 
   private async fetchOrderDetails(
     http: ReturnType<typeof this.client>,
@@ -220,6 +215,28 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     return results;
   }
 
+  // ─── BUSCA CUSTO DE FRETE DO VENDEDOR ────────────────────────────────────────
+  // Documentação: GET /shipments/{id}/costs
+  // senders[0].cost = custo real pago pelo vendedor após descontos
+  // gross_amount = custo bruto sem desconto
+
+  private async fetchShipmentCost(
+    http: ReturnType<typeof this.client>,
+    shipmentId: string
+  ): Promise<number | null> {
+    try {
+      const res = await http.get(`/shipments/${shipmentId}/costs`);
+      const data = res.data;
+      // Custo do vendedor (senders[0].cost) — já inclui descontos do ML
+      const sellerCost = data?.senders?.[0]?.cost;
+      if (sellerCost != null && sellerCost > 0) return sellerCost;
+      // Fallback: gross_amount se o seller não tem custo separado
+      return data?.gross_amount ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   // ─── NORMALIZAÇÃO ────────────────────────────────────────────────────────────
 
   private async normalizeMany(
@@ -238,7 +255,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     const results: NormalizedOrder[] = [];
     for (const raw of raws) {
       const detailed = detailMap.get(String(raw.id)) ?? raw;
-      const normalized = await this.normalizeSingle(detailed, account);
+      const normalized = await this.normalizeSingle(detailed, account, http);
       if (normalized) results.push(normalized);
     }
     return results;
@@ -246,11 +263,20 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   private async normalizeSingle(
     raw: any,
-    account: ChannelAccount
+    account: ChannelAccount,
+    http?: ReturnType<typeof this.client>
   ): Promise<NormalizedOrder | null> {
     if (!raw?.id) return null;
 
-    let shippingCost = raw.shipping?.cost ?? null;
+    // ── Custo de frete do vendedor ───────────────────────────────────────────
+    // Busca via /shipments/{id}/costs — único endpoint que retorna
+    // o valor real pago pelo vendedor (após descontos do ML)
+    let shippingCost: number | null = null;
+    if (raw.shipping?.id && http) {
+      shippingCost = await this.fetchShipmentCost(http, String(raw.shipping.id));
+    }
+
+    // ── Rateio de frete por pack ─────────────────────────────────────────────
     if (raw.pack_id && shippingCost != null) {
       shippingCost = await this.getProportionalShippingCost(
         String(raw.pack_id),
@@ -278,6 +304,20 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       moneyReleaseDate:  p.money_release_date ? new Date(p.money_release_date) : null,
     }));
 
+    // ── Dados do comprador ────────────────────────────────────────────────────
+    // billing_info tem CPF/CNPJ e nome real
+    // buyer.nickname tem o apelido do comprador
+    const buyerName = raw.buyer?.nickname ?? null;
+    const buyerDocType   = raw.billing_info?.doc_type ?? null;
+    const buyerDocNumber = raw.billing_info?.doc_number ?? null;
+
+    // ── Endereço de entrega ───────────────────────────────────────────────────
+    // Disponível em shipping.receiver_address (endpoint de detalhes)
+    const receiverAddress = raw.shipping?.receiver_address;
+    const buyerCity  = receiverAddress?.city?.name ?? null;
+    const buyerState = receiverAddress?.state?.name ?? null;
+
+    // ── Shipment ─────────────────────────────────────────────────────────────
     let shipment: NormalizedShipment | null = null;
     if (raw.shipping?.id) {
       shipment = {
@@ -288,6 +328,14 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       };
     }
 
+    // ── Net received ─────────────────────────────────────────────────────────
+    // net_received_amount = valor líquido recebido pelo vendedor
+    const netReceived = raw.payments?.[0]?.net_received_amount ?? null;
+
+    // ── Taxes ────────────────────────────────────────────────────────────────
+    // taxes.amount = impostos cobrados pelo ML (ex: IIBB, ISS)
+    const taxesAmount = raw.taxes?.amount ?? 0;
+
     return {
       externalOrderId:  String(raw.id),
       channelAccountId: account.id,
@@ -297,16 +345,16 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       dateCreated:      new Date(raw.date_created),
       dateLastUpdated:  new Date(raw.last_updated ?? raw.date_created),
       totalAmount:      raw.total_amount ?? 0,
-      netReceived:      raw.payments?.[0]?.net_received_amount ?? null,
-      taxesAmount:      raw.taxes?.amount ?? 0,
+      netReceived,
+      taxesAmount,
       shippingCost,
       shippingDiscount: raw.shipping?.shipping_discount ?? 0,
-      buyerName:        raw.buyer?.nickname ?? null,
-      buyerDocType:     raw.billing_info?.doc_type ?? null,
-      buyerDocNumber:   raw.billing_info?.doc_number ?? null,
-      buyerCity:        raw.shipping?.receiver_address?.city?.name ?? null,
-      buyerState:       raw.shipping?.receiver_address?.state?.name ?? null,
-      packId:           raw.pack_id ? String(raw.pack_id) : null,
+      buyerName,
+      buyerDocType,
+      buyerDocNumber,
+      buyerCity,
+      buyerState,
+      packId: raw.pack_id ? String(raw.pack_id) : null,
       items,
       payments,
       shipment,
