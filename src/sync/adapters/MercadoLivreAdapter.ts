@@ -22,8 +22,6 @@ const refreshInFlight = new Map<string, Promise<TokenPair>>();
 export class MercadoLivreAdapter implements ChannelSyncAdapter {
   readonly channelType = ChannelType.MERCADO_LIVRE;
 
-  // ─── HTTP CLIENT ────────────────────────────────────────────────────────────
-
   private client(accessToken: string) {
     return axios.create({
       baseURL: ML_BASE,
@@ -31,8 +29,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       timeout: 15000,
     });
   }
-
-  // ─── TOKEN ──────────────────────────────────────────────────────────────────
 
   async refreshTokenForAccount(account: ChannelAccount): Promise<TokenPair> {
     if (refreshInFlight.has(account.id)) {
@@ -183,42 +179,30 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── BUSCA DETALHES EM LOTE ──────────────────────────────────────────────────
-  // /orders/search retorna resumo — /orders?ids=... retorna dados completos
+  // Busca individualmente para garantir dados completos sem erros de lote
 
   private async fetchOrderDetails(
     http: ReturnType<typeof this.client>,
-    orderIds: string[]
-  ): Promise<any[]> {
-    if (orderIds.length === 0) return [];
+    raws: any[]
+  ): Promise<Map<string, any>> {
+    const detailMap = new Map<string, any>();
 
-    const chunks: string[][] = [];
-    for (let i = 0; i < orderIds.length; i += 50) {
-      chunks.push(orderIds.slice(i, i + 50));
-    }
-
-    const results: any[] = [];
-    for (const chunk of chunks) {
+    for (const raw of raws) {
+      const orderId = String(raw.id);
       try {
-        const res = await http.get("/orders", {
-          params: { ids: chunk.join(",") },
-        });
-        const data = res.data;
-        if (Array.isArray(data)) {
-          results.push(...data);
-        } else if (data?.results) {
-          results.push(...data.results);
+        const res = await http.get(`/orders/${orderId}`);
+        if (res.data?.id) {
+          detailMap.set(orderId, res.data);
         }
       } catch (err: any) {
-        console.error(`[ML] Erro ao buscar detalhes em lote:`, err?.message);
+        // Silencioso — usa o resumo como fallback
       }
     }
-    return results;
+
+    return detailMap;
   }
 
   // ─── BUSCA CUSTO DE FRETE DO VENDEDOR ────────────────────────────────────────
-  // Documentação: GET /shipments/{id}/costs
-  // senders[0].cost = custo real pago pelo vendedor após descontos
-  // gross_amount = custo bruto sem desconto
 
   private async fetchShipmentCost(
     http: ReturnType<typeof this.client>,
@@ -227,10 +211,8 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     try {
       const res = await http.get(`/shipments/${shipmentId}/costs`);
       const data = res.data;
-      // Custo do vendedor (senders[0].cost) — já inclui descontos do ML
       const sellerCost = data?.senders?.[0]?.cost;
       if (sellerCost != null && sellerCost > 0) return sellerCost;
-      // Fallback: gross_amount se o seller não tem custo separado
       return data?.gross_amount ?? null;
     } catch {
       return null;
@@ -244,13 +226,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     account: ChannelAccount,
     http: ReturnType<typeof this.client>
   ): Promise<NormalizedOrder[]> {
-    const orderIds = raws.map((r) => String(r.id));
-    const detailedOrders = await this.fetchOrderDetails(http, orderIds);
-
-    const detailMap = new Map<string, any>();
-    for (const order of detailedOrders) {
-      if (order?.id) detailMap.set(String(order.id), order);
-    }
+    const detailMap = await this.fetchOrderDetails(http, raws);
 
     const results: NormalizedOrder[] = [];
     for (const raw of raws) {
@@ -269,8 +245,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     if (!raw?.id) return null;
 
     // ── Custo de frete do vendedor ───────────────────────────────────────────
-    // Busca via /shipments/{id}/costs — único endpoint que retorna
-    // o valor real pago pelo vendedor (após descontos do ML)
     let shippingCost: number | null = null;
     if (raw.shipping?.id && http) {
       shippingCost = await this.fetchShipmentCost(http, String(raw.shipping.id));
@@ -304,20 +278,14 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       moneyReleaseDate:  p.money_release_date ? new Date(p.money_release_date) : null,
     }));
 
-    // ── Dados do comprador ────────────────────────────────────────────────────
-    // billing_info tem CPF/CNPJ e nome real
-    // buyer.nickname tem o apelido do comprador
-    const buyerName = raw.buyer?.nickname ?? null;
+    const buyerName      = raw.buyer?.nickname ?? null;
     const buyerDocType   = raw.billing_info?.doc_type ?? null;
     const buyerDocNumber = raw.billing_info?.doc_number ?? null;
 
-    // ── Endereço de entrega ───────────────────────────────────────────────────
-    // Disponível em shipping.receiver_address (endpoint de detalhes)
     const receiverAddress = raw.shipping?.receiver_address;
     const buyerCity  = receiverAddress?.city?.name ?? null;
     const buyerState = receiverAddress?.state?.name ?? null;
 
-    // ── Shipment ─────────────────────────────────────────────────────────────
     let shipment: NormalizedShipment | null = null;
     if (raw.shipping?.id) {
       shipment = {
@@ -328,16 +296,15 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       };
     }
 
-    // ── Net received ─────────────────────────────────────────────────────────
-    // net_received_amount = valor líquido recebido pelo vendedor
     const netReceived = raw.payments?.[0]?.net_received_amount ?? null;
-
-    // ── Taxes ────────────────────────────────────────────────────────────────
-    // taxes.amount = impostos cobrados pelo ML (ex: IIBB, ISS)
     const taxesAmount = raw.taxes?.amount ?? 0;
 
+    // ── ID exibido: pack_id se carrinho, order_id se compra direta ───────────
+    // Alinhado com o que aparece no painel do Mercado Livre
+    const displayId = raw.pack_id ? String(raw.pack_id) : String(raw.id);
+
     return {
-      externalOrderId:  String(raw.id),
+      externalOrderId:  String(raw.id),   // chave única interna (sempre order_id)
       channelAccountId: account.id,
       userId:           account.userId,
       channelType:      ChannelType.MERCADO_LIVRE,
