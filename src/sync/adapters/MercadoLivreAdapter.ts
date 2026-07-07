@@ -178,31 +178,83 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     return results;
   }
 
-  // ─── BUSCA DETALHES EM LOTE ──────────────────────────────────────────────────
-  // Busca individualmente para garantir dados completos sem erros de lote
+  // ─── BUSCA DETALHES COMPLETOS DO PEDIDO ──────────────────────────────────────
+  // GET /orders/{id} — dados completos do pedido
 
-  private async fetchOrderDetails(
+  private async fetchOrderDetail(
     http: ReturnType<typeof this.client>,
-    raws: any[]
-  ): Promise<Map<string, any>> {
-    const detailMap = new Map<string, any>();
-
-    for (const raw of raws) {
-      const orderId = String(raw.id);
-      try {
-        const res = await http.get(`/orders/${orderId}`);
-        if (res.data?.id) {
-          detailMap.set(orderId, res.data);
-        }
-      } catch (err: any) {
-        // Silencioso — usa o resumo como fallback
-      }
+    orderId: string
+  ): Promise<any | null> {
+    try {
+      const res = await http.get(`/orders/${orderId}`);
+      return res.data ?? null;
+    } catch {
+      return null;
     }
+  }
 
-    return detailMap;
+  // ─── BUSCA BILLING INFO (CPF/CNPJ) ───────────────────────────────────────────
+  // GET /orders/{id}/billing_info com x-version: 2
+  // Retorna CPF/CNPJ e nome fiscal do comprador
+
+  private async fetchBillingInfo(
+    http: ReturnType<typeof this.client>,
+    orderId: string
+  ): Promise<{ docType: string | null; docNumber: string | null; name: string | null }> {
+    try {
+      const res = await http.get(`/orders/${orderId}/billing_info`, {
+        headers: { "x-version": "2" },
+      });
+      const billing = res.data?.buyer?.billing_info;
+      return {
+        docType:   billing?.identification?.type ?? billing?.doc_type ?? null,
+        docNumber: billing?.identification?.number ?? billing?.doc_number ?? null,
+        name:      billing?.name ? `${billing.name} ${billing.last_name ?? ""}`.trim() : null,
+      };
+    } catch {
+      return { docType: null, docNumber: null, name: null };
+    }
+  }
+
+  // ─── BUSCA DADOS DO SHIPMENT ──────────────────────────────────────────────────
+  // GET /shipments/{id} com x-format-new: true
+  // Retorna endereço de entrega (destination.shipping_address) e tracking
+
+  private async fetchShipmentData(
+    http: ReturnType<typeof this.client>,
+    shipmentId: string
+  ): Promise<{
+    city: string | null;
+    state: string | null;
+    zipCode: string | null;
+    trackingNumber: string | null;
+    status: string | null;
+  }> {
+    try {
+      const res = await http.get(`/shipments/${shipmentId}`, {
+        headers: { "x-format-new": "true" },
+      });
+      const data = res.data;
+
+      // Novo formato: destination.shipping_address
+      // Legado: receiver_address
+      const addr = data?.destination?.shipping_address ?? data?.receiver_address ?? null;
+
+      return {
+        city:           addr?.city?.name ?? addr?.city ?? null,
+        state:          addr?.state?.name ?? addr?.state?.id ?? null,
+        zipCode:        addr?.zip_code ?? null,
+        trackingNumber: data?.tracking_number ?? null,
+        status:         data?.status ?? null,
+      };
+    } catch {
+      return { city: null, state: null, zipCode: null, trackingNumber: null, status: null };
+    }
   }
 
   // ─── BUSCA CUSTO DE FRETE DO VENDEDOR ────────────────────────────────────────
+  // GET /shipments/{id}/costs
+  // senders[0].cost = custo real pago pelo vendedor após descontos
 
   private async fetchShipmentCost(
     http: ReturnType<typeof this.client>,
@@ -211,8 +263,10 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     try {
       const res = await http.get(`/shipments/${shipmentId}/costs`);
       const data = res.data;
+      // Custo do vendedor após descontos
       const sellerCost = data?.senders?.[0]?.cost;
       if (sellerCost != null && sellerCost > 0) return sellerCost;
+      // Fallback: gross_amount
       return data?.gross_amount ?? null;
     } catch {
       return null;
@@ -226,11 +280,10 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     account: ChannelAccount,
     http: ReturnType<typeof this.client>
   ): Promise<NormalizedOrder[]> {
-    const detailMap = await this.fetchOrderDetails(http, raws);
-
     const results: NormalizedOrder[] = [];
     for (const raw of raws) {
-      const detailed = detailMap.get(String(raw.id)) ?? raw;
+      // Busca detalhes completos individualmente
+      const detailed = await this.fetchOrderDetail(http, String(raw.id)) ?? raw;
       const normalized = await this.normalizeSingle(detailed, account, http);
       if (normalized) results.push(normalized);
     }
@@ -244,21 +297,50 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   ): Promise<NormalizedOrder | null> {
     if (!raw?.id) return null;
 
-    // ── Custo de frete do vendedor ───────────────────────────────────────────
-    let shippingCost: number | null = null;
-    if (raw.shipping?.id && http) {
-      shippingCost = await this.fetchShipmentCost(http, String(raw.shipping.id));
+    const orderId    = String(raw.id);
+    const shipmentId = raw.shipping?.id ? String(raw.shipping.id) : null;
+
+    // ── Dados do shipment (endereço + tracking + custo) ──────────────────────
+    let buyerCity: string | null      = null;
+    let buyerState: string | null     = null;
+    let trackingNumber: string | null = null;
+    let shippingCost: number | null   = null;
+    let shipmentStatus: string | null = null;
+
+    if (shipmentId && http) {
+      const [shipmentData, cost] = await Promise.all([
+        this.fetchShipmentData(http, shipmentId),
+        this.fetchShipmentCost(http, shipmentId),
+      ]);
+      buyerCity      = shipmentData.city;
+      buyerState     = shipmentData.state;
+      trackingNumber = shipmentData.trackingNumber;
+      shipmentStatus = shipmentData.status;
+      shippingCost   = cost;
     }
 
     // ── Rateio de frete por pack ─────────────────────────────────────────────
     if (raw.pack_id && shippingCost != null) {
       shippingCost = await this.getProportionalShippingCost(
         String(raw.pack_id),
-        String(raw.id),
+        orderId,
         shippingCost
       );
     }
 
+    // ── Billing info (CPF/CNPJ) via endpoint dedicado ────────────────────────
+    // billing_info no objeto do pedido pode estar vazio — endpoint dedicado
+    // retorna dados mais completos com x-version: 2
+    let buyerDocType: string | null   = raw.billing_info?.doc_type ?? null;
+    let buyerDocNumber: string | null = raw.billing_info?.doc_number ?? null;
+
+    if (http && (!buyerDocType || !buyerDocNumber)) {
+      const billing = await this.fetchBillingInfo(http, orderId);
+      buyerDocType   = billing.docType   ?? buyerDocType;
+      buyerDocNumber = billing.docNumber ?? buyerDocNumber;
+    }
+
+    // ── Itens ────────────────────────────────────────────────────────────────
     const items: NormalizedItem[] = (raw.order_items ?? []).map((i: any) => ({
       externalItemId: i.item?.id ?? null,
       title:          i.item?.title ?? "",
@@ -268,6 +350,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       saleFee:        i.sale_fee ?? 0,
     }));
 
+    // ── Pagamentos ───────────────────────────────────────────────────────────
     const payments: NormalizedPayment[] = (raw.payments ?? []).map((p: any) => ({
       externalPaymentId: p.id ? String(p.id) : null,
       status:            p.status ?? "",
@@ -278,33 +361,19 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       moneyReleaseDate:  p.money_release_date ? new Date(p.money_release_date) : null,
     }));
 
-    const buyerName      = raw.buyer?.nickname ?? null;
-    const buyerDocType   = raw.billing_info?.doc_type ?? null;
-    const buyerDocNumber = raw.billing_info?.doc_number ?? null;
-
-    const receiverAddress = raw.shipping?.receiver_address;
-    const buyerCity  = receiverAddress?.city?.name ?? null;
-    const buyerState = receiverAddress?.state?.name ?? null;
-
+    // ── Shipment ─────────────────────────────────────────────────────────────
     let shipment: NormalizedShipment | null = null;
-    if (raw.shipping?.id) {
+    if (shipmentId) {
       shipment = {
-        externalShipmentId: String(raw.shipping.id),
-        status:             raw.shipping.status ?? "",
-        trackingNumber:     raw.shipping.tracking_number ?? null,
+        externalShipmentId: shipmentId,
+        status:             shipmentStatus ?? raw.shipping?.status ?? "",
+        trackingNumber,
         cost:               shippingCost,
       };
     }
 
-    const netReceived = raw.payments?.[0]?.net_received_amount ?? null;
-    const taxesAmount = raw.taxes?.amount ?? 0;
-
-    // ── ID exibido: pack_id se carrinho, order_id se compra direta ───────────
-    // Alinhado com o que aparece no painel do Mercado Livre
-    const displayId = raw.pack_id ? String(raw.pack_id) : String(raw.id);
-
     return {
-      externalOrderId:  String(raw.id),   // chave única interna (sempre order_id)
+      externalOrderId:  orderId,
       channelAccountId: account.id,
       userId:           account.userId,
       channelType:      ChannelType.MERCADO_LIVRE,
@@ -312,11 +381,11 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       dateCreated:      new Date(raw.date_created),
       dateLastUpdated:  new Date(raw.last_updated ?? raw.date_created),
       totalAmount:      raw.total_amount ?? 0,
-      netReceived,
-      taxesAmount,
+      netReceived:      raw.payments?.[0]?.net_received_amount ?? null,
+      taxesAmount:      raw.taxes?.amount ?? 0,
       shippingCost,
       shippingDiscount: raw.shipping?.shipping_discount ?? 0,
-      buyerName,
+      buyerName:        raw.buyer?.nickname ?? null,
       buyerDocType,
       buyerDocNumber,
       buyerCity,
