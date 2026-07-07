@@ -1,14 +1,8 @@
 // src/lib/ml.ts
-//
-// Única mudança em relação ao arquivo atual: getValidToken agora usa um
-// mapa de promises em andamento por tokenId, para que duas chamadas
-// concorrentes que precisem renovar o mesmo token esperem a MESMA
-// renovação, em vez de disparar duas trocas de refresh_token em paralelo
-// (o ML rotaciona o refresh_token a cada troca, então a segunda chamada
-// concorrente falharia usando um refresh_token já invalidado pela primeira).
 
 import axios from "axios";
 import prisma from "./prisma";
+import { encrypt, decrypt } from "./crypto";
 
 const ML_BASE = "https://api.mercadolibre.com";
 const CLIENT_ID = process.env.ML_CLIENT_ID!;
@@ -46,14 +40,12 @@ export async function refreshToken(tokenId: number) {
   return updated;
 }
 
-// Evita que duas chamadas concorrentes renovem o mesmo token ao mesmo tempo.
 const refreshInFlight = new Map<number, Promise<any>>();
 
 export async function getValidToken(tokenId: number) {
   let tokenRecord = await prisma.token.findUnique({ where: { id: tokenId } });
   if (!tokenRecord) throw new Error("Token not found");
 
-  // Renova se expira em menos de 1 hora
   const expiresInMs = tokenRecord.expiresAt.getTime() - Date.now();
   if (expiresInMs < 60 * 60 * 1000) {
     if (!refreshInFlight.has(tokenId)) {
@@ -65,17 +57,48 @@ export async function getValidToken(tokenId: number) {
   return tokenRecord;
 }
 
-// Job de renovação automática — roda a cada 5 horas
-// Renova todos os tokens que expiram nas próximas 2 horas
+// ─── REFRESH DE ChannelAccount (novo motor) ───────────────────────────────────
+
+async function refreshChannelAccount(accountId: string): Promise<void> {
+  const account = await prisma.channelAccount.findUnique({ where: { id: accountId } });
+  if (!account) return;
+
+  const refreshTokenValue = decrypt(account.refreshTokenEnc);
+
+  const res = await axios.post(`${ML_BASE}/oauth/token`, {
+    grant_type: "refresh_token",
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    refresh_token: refreshTokenValue,
+  });
+
+  const expiresAt = new Date(Date.now() + res.data.expires_in * 1000);
+
+  await prisma.channelAccount.update({
+    where: { id: accountId },
+    data: {
+      accessTokenEnc:  encrypt(res.data.access_token),
+      refreshTokenEnc: encrypt(res.data.refresh_token),
+      tokenExpiresAt:  expiresAt,
+    },
+  });
+
+  console.log(`[ML] ChannelAccount ${accountId} renovada. Expira em: ${expiresAt.toISOString()}`);
+}
+
+// ─── JOB DE RENOVAÇÃO AUTOMÁTICA ─────────────────────────────────────────────
+// Roda a cada 5 horas — renova tokens que expiram nas próximas 2 horas
+
 export async function runTokenRefreshJob() {
   console.log("[TokenRefreshJob] Verificando tokens...");
   const in2Hours = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
+  // ── Tabela Token antiga (compatibilidade) ──────────────────────────────────
   const tokens = await prisma.token.findMany({
     where: { expiresAt: { lte: in2Hours } },
   });
 
-  console.log(`[TokenRefreshJob] ${tokens.length} token(s) para renovar`);
+  console.log(`[TokenRefreshJob] ${tokens.length} token(s) legado(s) para renovar`);
 
   for (const token of tokens) {
     try {
@@ -93,6 +116,33 @@ export async function runTokenRefreshJob() {
       }).catch(() => {});
     }
   }
+
+  // ── ChannelAccount novo motor ──────────────────────────────────────────────
+  const channelAccounts = await prisma.channelAccount.findMany({
+    where: {
+      channelType:   "MERCADO_LIVRE",
+      tokenExpiresAt: { lte: in2Hours },
+    },
+  });
+
+  console.log(`[TokenRefreshJob] ${channelAccounts.length} ChannelAccount(s) ML para renovar`);
+
+  for (const account of channelAccounts) {
+    try {
+      await refreshChannelAccount(account.id);
+    } catch (err: any) {
+      console.error(`[TokenRefreshJob] Falha ao renovar ChannelAccount ${account.id}:`, err?.message);
+      await prisma.adminAlert.create({
+        data: {
+          type:        "token_refresh_failed",
+          severity:    "critical",
+          clientId:    account.userId,
+          description: `Falha ao renovar token da conta ML '${account.apelido ?? account.externalNickname ?? account.id}'. Reconexão necessária.`,
+        },
+      }).catch(() => {});
+    }
+  }
+
   console.log("[TokenRefreshJob] Concluído");
 }
 
