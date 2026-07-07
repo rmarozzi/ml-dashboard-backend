@@ -3,6 +3,7 @@
 // Adapter do Mercado Livre para o SyncEngine.
 // Encapsula toda a lógica específica do ML: paginação por offset,
 // limite de 10k registros, rateio de frete por pack, refresh de token.
+
 import { encrypt, decrypt } from "../../lib/crypto";
 import axios from "axios";
 import prisma from "../../lib/prisma";
@@ -20,7 +21,6 @@ const ML_BASE = "https://api.mercadolibre.com";
 const CLIENT_ID = process.env.ML_CLIENT_ID!;
 const CLIENT_SECRET = process.env.ML_CLIENT_SECRET!;
 
-// Proteção contra refresh concorrente do mesmo token
 const refreshInFlight = new Map<string, Promise<TokenPair>>();
 
 export class MercadoLivreAdapter implements ChannelSyncAdapter {
@@ -42,7 +42,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     if (refreshInFlight.has(account.id)) {
       return refreshInFlight.get(account.id)!;
     }
-
     const promise = this._doRefresh(account).finally(() =>
       refreshInFlight.delete(account.id)
     );
@@ -52,20 +51,17 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   private async _doRefresh(account: ChannelAccount): Promise<TokenPair> {
     const refreshToken = decrypt(account.refreshTokenEnc);
-
     const res = await axios.post(`${ML_BASE}/oauth/token`, {
       grant_type: "refresh_token",
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
       refresh_token: refreshToken,
     });
-
     const tokenPair: TokenPair = {
       accessToken:  res.data.access_token,
       refreshToken: res.data.refresh_token,
       expiresAt:    new Date(Date.now() + res.data.expires_in * 1000),
     };
-
     await prisma.channelAccount.update({
       where: { id: account.id },
       data: {
@@ -74,7 +70,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
         tokenExpiresAt:  tokenPair.expiresAt,
       },
     });
-
     console.log(`[ML] Token renovado para conta ${account.id}. Expira: ${tokenPair.expiresAt.toISOString()}`);
     return tokenPair;
   }
@@ -94,14 +89,12 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     account: ChannelAccount,
     since?: Date
   ): AsyncGenerator<NormalizedOrder[]> {
-    // ML não filtra por date_created de forma confiável — buscamos tudo
-    // via paginação por offset com guarda do limite de 10k
     const accessToken = await this.getAccessToken(account);
     const http = this.client(accessToken);
 
     let offset = 0;
     const limit = 50;
-    const MAX_OFFSET = 9950; // teto seguro antes do limite de 10k
+    const MAX_OFFSET = 9950;
 
     while (true) {
       if (offset > MAX_OFFSET) {
@@ -121,7 +114,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const results: any[] = res.data?.results ?? [];
       if (results.length === 0) break;
 
-      const normalized = await this.normalizeMany(results, account);
+      const normalized = await this.normalizeMany(results, account, http);
       if (normalized.length > 0) yield normalized;
 
       if (results.length < limit) break;
@@ -151,10 +144,10 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
       const res = await http.get("/orders/search", {
         params: {
-          seller:                        account.externalAccountId,
+          seller:                         account.externalAccountId,
           "order.date_last_updated.from": since.toISOString(),
           "order.date_last_updated.to":   until.toISOString(),
-          sort:                          "date_last_updated_asc",
+          sort:                           "date_last_updated_asc",
           offset,
           limit,
         },
@@ -163,7 +156,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const results: any[] = res.data?.results ?? [];
       if (results.length === 0) break;
 
-      const normalized = await this.normalizeMany(results, account);
+      const normalized = await this.normalizeMany(results, account, http);
       if (normalized.length > 0) yield normalized;
 
       if (results.length < limit) break;
@@ -181,7 +174,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     const http = this.client(accessToken);
     const results: NormalizedOrder[] = [];
 
-    // ML não tem endpoint de batch por ID — busca individualmente
     for (const orderId of externalOrderIds) {
       try {
         const res = await http.get(`/orders/${orderId}`);
@@ -195,15 +187,61 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     return results;
   }
 
+  // ─── BUSCA DETALHES EM LOTE ──────────────────────────────────────────────────
+  // /orders/search retorna resumo — /orders?ids=... retorna dados completos
+  // incluindo shipping.receiver_address, billing_info e payments detalhados
+
+  private async fetchOrderDetails(
+    http: ReturnType<typeof this.client>,
+    orderIds: string[]
+  ): Promise<any[]> {
+    if (orderIds.length === 0) return [];
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < orderIds.length; i += 50) {
+      chunks.push(orderIds.slice(i, i + 50));
+    }
+
+    const results: any[] = [];
+    for (const chunk of chunks) {
+      try {
+        const res = await http.get("/orders", {
+          params: { ids: chunk.join(",") },
+        });
+        const data = res.data;
+        if (Array.isArray(data)) {
+          results.push(...data);
+        } else if (data?.results) {
+          results.push(...data.results);
+        }
+      } catch (err: any) {
+        console.error(`[ML] Erro ao buscar detalhes em lote:`, err?.message);
+      }
+    }
+    return results;
+  }
+
   // ─── NORMALIZAÇÃO ────────────────────────────────────────────────────────────
 
   private async normalizeMany(
     raws: any[],
-    account: ChannelAccount
+    account: ChannelAccount,
+    http: ReturnType<typeof this.client>
   ): Promise<NormalizedOrder[]> {
+    // Busca detalhes completos em lote para ter shipping, billing_info, payments
+    const orderIds = raws.map((r) => String(r.id));
+    const detailedOrders = await this.fetchOrderDetails(http, orderIds);
+
+    const detailMap = new Map<string, any>();
+    for (const order of detailedOrders) {
+      if (order?.id) detailMap.set(String(order.id), order);
+    }
+
     const results: NormalizedOrder[] = [];
     for (const raw of raws) {
-      const normalized = await this.normalizeSingle(raw, account);
+      // Usa detalhes completos se disponível, senão usa o resumo
+      const detailed = detailMap.get(String(raw.id)) ?? raw;
+      const normalized = await this.normalizeSingle(detailed, account);
       if (normalized) results.push(normalized);
     }
     return results;
@@ -215,9 +253,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   ): Promise<NormalizedOrder | null> {
     if (!raw?.id) return null;
 
-    // ── Frete por pack ───────────────────────────────────────────────────────
-    // Se o pedido faz parte de um pack, o custo de frete deve ser rateado
-    // proporcionalmente entre os pedidos do pack (não armazenado integral)
     let shippingCost = raw.shipping?.cost ?? null;
     if (raw.pack_id && shippingCost != null) {
       shippingCost = await this.getProportionalShippingCost(
@@ -282,8 +317,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ── Rateio de frete por pack ─────────────────────────────────────────────────
-  // Busca todos os pedidos do pack e divide o frete proporcionalmente
-  // pelo valor de cada pedido (não armazena o valor cheio em todos)
+
   private async getProportionalShippingCost(
     packId: string,
     orderId: string,
