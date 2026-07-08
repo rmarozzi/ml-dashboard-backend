@@ -23,7 +23,7 @@ import { syncEngine } from "./sync/SyncEngine";
 import { runTier1Job, runTier2Job, triggerBackfillAsync } from "./jobs/syncOrchestrator";
 import channelsRouter from "./routes/channels";
 import prisma from "./lib/prisma";
-
+import webhooksRouter from "./routes/webhooks";
 
 
 
@@ -123,5 +123,6 @@ if (process.env.NODE_ENV === "production") {
   setInterval(runTier2Job, 5 * 60 * 1000);
   setTimeout(runTier2Job, 30000); // primeira execução 30s após o boot
 }
+app.use("/webhooks", webhooksRouter);
 
 export default app;

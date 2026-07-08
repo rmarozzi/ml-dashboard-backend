@@ -1,151 +1,111 @@
-// src/sync/SyncEngine.ts
-//
-// Motor central de sincronização multi-canal.
-// Não conhece detalhes de nenhuma plataforma — só orquestra os adapters
-// e persiste os resultados via SyncExecutionLog.
-
 import prisma from "../lib/prisma";
 import { ChannelAccount, SyncStatus } from "@prisma/client";
-import {
-  ChannelSyncAdapter,
-  NormalizedOrder,
-  SyncTierResult,
-} from "./types";
+import { ChannelSyncAdapter, NormalizedOrder, SyncTierResult } from "./types";
 
 export class SyncEngine {
-  private adapters = new Map<string, ChannelSyncAdapter>();
+  private adapters          = new Map<string, ChannelSyncAdapter>();
   private backfillInProgress = new Set<string>();
-
-  // ─── REGISTRO DE ADAPTERS ───────────────────────────────────────────────────
 
   registerAdapter(adapter: ChannelSyncAdapter): void {
     this.adapters.set(adapter.channelType, adapter);
     console.log(`[SyncEngine] Adapter registrado: ${adapter.channelType}`);
   }
 
-  private getAdapter(account: ChannelAccount): ChannelSyncAdapter {
-    const adapter = this.adapters.get(account.channelType);
-    if (!adapter) {
-      throw new Error(
-        `[SyncEngine] Nenhum adapter registrado para canal: ${account.channelType}`
-      );
-    }
+  getAdapter(channelType: string): ChannelSyncAdapter {
+    const adapter = this.adapters.get(channelType);
+    if (!adapter) throw new Error(`[SyncEngine] Nenhum adapter para: ${channelType}`);
     return adapter;
   }
 
-  // ─── TIER 0 — BACKFILL HISTÓRICO ───────────────────────────────────────────
+  private getAdapterForAccount(account: ChannelAccount): ChannelSyncAdapter {
+    return this.getAdapter(account.channelType);
+  }
+
+  // ─── TIER 0 — BACKFILL ──────────────────────────────────────────────────────
 
   async runBackfill(account: ChannelAccount, since?: Date): Promise<void> {
     if (this.backfillInProgress.has(account.id)) {
-      console.log(`[SyncEngine][Tier0] Backfill já em andamento para conta ${account.id} — ignorando.`);
+      console.log(`[SyncEngine][Tier0] Backfill já em andamento para ${account.id} — ignorando.`);
       return;
     }
     this.backfillInProgress.add(account.id);
 
-    const adapter = this.getAdapter(account);
-    const logId = await this.startLog(account.id, 0);
-
-    let ordersFound = 0;
-    let ordersUpserted = 0;
+    const adapter = this.getAdapterForAccount(account);
+    const logId   = await this.startLog(account.id, 0);
+    let ordersFound = 0, ordersUpserted = 0;
 
     try {
-      console.log(
-        `[SyncEngine][Tier0] Iniciando backfill: ${account.channelType} / conta ${account.id}`
-      );
+      console.log(`[SyncEngine][Tier0] Iniciando backfill: ${account.channelType} / ${account.id}`);
 
       for await (const batch of adapter.backfillHistorical(account, since)) {
-        ordersFound += batch.length;
-        const upserted = await this.persistBatch(batch);
-        ordersUpserted += upserted;
-        console.log(
-          `[SyncEngine][Tier0] Lote processado: ${batch.length} encontrados, ${upserted} persistidos`
-        );
+        ordersFound    += batch.length;
+        ordersUpserted += await this.persistBatch(batch);
+        console.log(`[SyncEngine][Tier0] Lote: ${batch.length} encontrados, ${ordersUpserted} persistidos total`);
       }
 
-      await this.finishLog(logId, SyncStatus.SUCCESS, { ordersFound, ordersUpserted });
-
+      // ✅ CRÍTICO: marca como concluído ANTES do finishLog
+      // Se o finishLog falhar (log apagado externamente), o initialSyncDone já foi gravado
       await prisma.channelAccount.update({
         where: { id: account.id },
-        data: { initialSyncDone: true, lastSyncAt: new Date() },
+        data:  { initialSyncDone: true, lastSyncAt: new Date() },
       });
 
-      console.log(
-        `[SyncEngine][Tier0] Backfill concluído: ${ordersUpserted} pedidos persistidos`
-      );
+      await this.finishLog(logId, SyncStatus.SUCCESS, { ordersFound, ordersUpserted });
+      console.log(`[SyncEngine][Tier0] Backfill concluído: ${ordersUpserted} pedidos persistidos`);
+
     } catch (err: any) {
       console.error(`[SyncEngine][Tier0] Erro:`, err?.message);
-      await this.finishLog(logId, SyncStatus.FAILED, {
-        ordersFound,
-        ordersUpserted,
-        errorDetail: err?.message,
-      });
+      await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
       throw err;
     } finally {
       this.backfillInProgress.delete(account.id);
     }
   }
 
-  // ─── TIER 1 — DESCOBERTA INCREMENTAL ───────────────────────────────────────
+  // ─── TIER 1 — INCREMENTAL ───────────────────────────────────────────────────
 
   async runIncrementalSync(account: ChannelAccount): Promise<void> {
-    if (!account.initialSyncDone) {
-      console.log(
-        `[SyncEngine][Tier1] Backfill pendente para conta ${account.id} — pulando Tier1`
-      );
-      return;
-    }
+    if (!account.initialSyncDone) return;
 
-    const adapter = this.getAdapter(account);
-    const since = account.lastSyncAt ?? new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const until = new Date();
-    const logId = await this.startLog(account.id, 1, since, until);
-
-    let ordersFound = 0;
-    let ordersUpserted = 0;
+    const adapter = this.getAdapterForAccount(account);
+    const since   = account.lastSyncAt ?? new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const until   = new Date();
+    const logId   = await this.startLog(account.id, 1, since, until);
+    let ordersFound = 0, ordersUpserted = 0;
 
     try {
-      console.log(
-        `[SyncEngine][Tier1] ${account.channelType} / conta ${account.id} — janela: ${since.toISOString()} → ${until.toISOString()}`
-      );
+      console.log(`[SyncEngine][Tier1] ${account.channelType} / ${account.id} — ${since.toISOString()} → ${until.toISOString()}`);
 
       for await (const batch of adapter.discoverUpdatedOrders(account, since, until)) {
-        ordersFound += batch.length;
-        const upserted = await this.persistBatch(batch);
-        ordersUpserted += upserted;
+        ordersFound    += batch.length;
+        ordersUpserted += await this.persistBatch(batch);
       }
 
+      await prisma.channelAccount.update({ where: { id: account.id }, data: { lastSyncAt: until } });
       await this.finishLog(logId, SyncStatus.SUCCESS, { ordersFound, ordersUpserted });
 
-      await prisma.channelAccount.update({
-        where: { id: account.id },
-        data: { lastSyncAt: until },
-      });
-
-      console.log(
-        `[SyncEngine][Tier1] Concluído: ${ordersUpserted} pedidos persistidos`
-      );
+      if (ordersFound > 0) {
+        console.log(`[SyncEngine][Tier1] ${ordersUpserted} pedidos atualizados`);
+      }
     } catch (err: any) {
       console.error(`[SyncEngine][Tier1] Erro:`, err?.message);
-      await this.finishLog(logId, SyncStatus.FAILED, {
-        ordersFound,
-        ordersUpserted,
-        errorDetail: err?.message,
-      });
+      await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
     }
   }
 
-  // ─── TIER 2 — RECHECK DE PEDIDOS NÃO ASSENTADOS ────────────────────────────
+  // ─── TIER 2 — RECHECK DE ASSENTAMENTO ──────────────────────────────────────
 
   async runSettlementRecheck(account: ChannelAccount): Promise<void> {
-    const adapter = this.getAdapter(account);
+    if (!account.initialSyncDone) return;
 
+    const adapter   = this.getAdapterForAccount(account);
     const window30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const now = new Date();
+    const now       = new Date();
 
-    const unsettledOrders = await prisma.order.findMany({
+    const unsettled = await prisma.order.findMany({
       where: {
         channelAccountId: account.id,
-        dateCreated: { gte: window30d },
+        dateCreated:      { gte: window30d },
         payments: {
           some: {
             OR: [
@@ -158,45 +118,51 @@ export class SyncEngine {
       select: { externalOrderId: true },
     });
 
-    if (unsettledOrders.length === 0) return;
+    if (unsettled.length === 0) return;
 
-    const externalIds = unsettledOrders.map((o) => o.externalOrderId);
     const logId = await this.startLog(account.id, 2);
+    let ordersFound = 0, ordersUpserted = 0;
 
     try {
-      console.log(
-        `[SyncEngine][Tier2] ${account.channelType} / conta ${account.id} — ${externalIds.length} pedidos para recheck`
-      );
+      console.log(`[SyncEngine][Tier2] ${account.channelType} / ${account.id} — ${unsettled.length} pedidos para recheck`);
 
-      const orders = await adapter.recheckOrders(account, externalIds);
-      const upserted = await this.persistBatch(orders);
+      const orders = await adapter.recheckOrders(account, unsettled.map((o) => o.externalOrderId));
+      ordersFound    = orders.length;
+      ordersUpserted = await this.persistBatch(orders);
 
-      await this.finishLog(logId, SyncStatus.SUCCESS, {
-        ordersFound: orders.length,
-        ordersUpserted: upserted,
-      });
-
-      console.log(`[SyncEngine][Tier2] Concluído: ${upserted} pedidos atualizados`);
+      await this.finishLog(logId, SyncStatus.SUCCESS, { ordersFound, ordersUpserted });
+      console.log(`[SyncEngine][Tier2] ${ordersUpserted} pedidos atualizados`);
     } catch (err: any) {
       console.error(`[SyncEngine][Tier2] Erro:`, err?.message);
-      await this.finishLog(logId, SyncStatus.FAILED, {
-        ordersFound: 0,
-        ordersUpserted: 0,
-        errorDetail: err?.message,
-      });
+      await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
+    }
+  }
+
+  // ─── WEBHOOK — ATUALIZAÇÃO EM TEMPO REAL ────────────────────────────────────
+
+  async processWebhook(account: ChannelAccount, payload: any): Promise<void> {
+    const adapter = this.getAdapterForAccount(account);
+    if (!adapter.handleWebhook) return;
+
+    try {
+      const order = await adapter.handleWebhook(account, payload);
+      if (order) await this.persistBatch([order]);
+    } catch (err: any) {
+      console.error(`[SyncEngine][Webhook] Erro:`, err?.message);
     }
   }
 
   // ─── PERSISTÊNCIA ───────────────────────────────────────────────────────────
 
-  private async persistBatch(orders: NormalizedOrder[]): Promise<number> {
+  async persistBatch(orders: NormalizedOrder[]): Promise<number> {
     let upserted = 0;
 
     for (const order of orders) {
       try {
         await prisma.$transaction(async (tx) => {
+
           const saved = await tx.order.upsert({
-            where: { externalOrderId: order.externalOrderId },
+            where:  { externalOrderId: order.externalOrderId },
             create: {
               externalOrderId:  order.externalOrderId,
               channelAccountId: order.channelAccountId,
@@ -218,22 +184,26 @@ export class SyncEngine {
               packId:           order.packId,
             },
             update: {
-              status:           order.status,
-              dateLastUpdated:  order.dateLastUpdated,
-              netReceived:      order.netReceived,
-              taxesAmount:      order.taxesAmount,
-              shippingCost:     order.shippingCost,
-              shippingDiscount: order.shippingDiscount,
-              buyerName:        order.buyerName ?? undefined,
-              buyerCity:        order.buyerCity,
-              buyerState:       order.buyerState,
+              status:          order.status,
+              dateLastUpdated: order.dateLastUpdated,
+              // ✅ Nunca sobrescreve com null — preserva dados já salvos
+              ...(order.netReceived      != null && { netReceived:      order.netReceived }),
+              ...(order.taxesAmount      != null && { taxesAmount:      order.taxesAmount }),
+              ...(order.shippingCost     != null && { shippingCost:     order.shippingCost }),
+              ...(order.shippingDiscount != null && { shippingDiscount: order.shippingDiscount }),
+              ...(order.buyerName        != null && { buyerName:        order.buyerName }),
+              ...(order.buyerDocType     != null && { buyerDocType:     order.buyerDocType }),
+              ...(order.buyerDocNumber   != null && { buyerDocNumber:   order.buyerDocNumber }),
+              ...(order.buyerCity        != null && { buyerCity:        order.buyerCity }),
+              ...(order.buyerState       != null && { buyerState:       order.buyerState }),
             },
           });
 
+          // Pagamentos
           for (const payment of order.payments) {
             if (!payment.externalPaymentId) continue;
             await tx.payment.upsert({
-              where: { externalPaymentId: payment.externalPaymentId },
+              where:  { externalPaymentId: payment.externalPaymentId },
               create: {
                 orderId:           saved.id,
                 externalPaymentId: payment.externalPaymentId,
@@ -247,14 +217,16 @@ export class SyncEngine {
               update: {
                 status:           payment.status,
                 totalPaidAmount:  payment.totalPaidAmount,
-                moneyReleaseDate: payment.moneyReleaseDate,
+                ...(payment.moneyReleaseDate  != null && { moneyReleaseDate:  payment.moneyReleaseDate }),
+                ...(payment.netReceivedAmount != null && { netReceivedAmount: payment.netReceivedAmount }),
               },
             });
           }
 
+          // Itens — imutáveis após a venda, só cria na primeira vez
           if (order.items.length > 0) {
-            const existing = await tx.item.count({ where: { orderId: saved.id } });
-            if (existing === 0) {
+            const exists = await tx.item.count({ where: { orderId: saved.id } });
+            if (exists === 0) {
               await tx.item.createMany({
                 data: order.items.map((i) => ({
                   orderId:        saved.id,
@@ -269,9 +241,10 @@ export class SyncEngine {
             }
           }
 
+          // Envio
           if (order.shipment) {
             await tx.shipment.upsert({
-              where: { orderId: saved.id },
+              where:  { orderId: saved.id },
               create: {
                 orderId:            saved.id,
                 externalShipmentId: order.shipment.externalShipmentId,
@@ -280,9 +253,9 @@ export class SyncEngine {
                 cost:               order.shipment.cost,
               },
               update: {
-                status:         order.shipment.status,
-                trackingNumber: order.shipment.trackingNumber,
-                cost:           order.shipment.cost,
+                status: order.shipment.status,
+                ...(order.shipment.trackingNumber != null && { trackingNumber: order.shipment.trackingNumber }),
+                ...(order.shipment.cost           != null && { cost:           order.shipment.cost }),
               },
             });
           }
@@ -290,10 +263,7 @@ export class SyncEngine {
 
         upserted++;
       } catch (err: any) {
-        console.error(
-          `[SyncEngine] Erro ao persistir pedido ${order.externalOrderId}:`,
-          err?.message
-        );
+        console.error(`[SyncEngine] Erro ao persistir pedido ${order.externalOrderId}:`, err?.message);
       }
     }
 
@@ -309,32 +279,31 @@ export class SyncEngine {
     windowEnd?: Date
   ): Promise<string> {
     const log = await prisma.syncExecutionLog.create({
-      data: {
-        channelAccountId,
-        tier,
-        windowStart,
-        windowEnd,
-        status: SyncStatus.RUNNING,
-      },
+      data: { channelAccountId, tier, windowStart, windowEnd, status: SyncStatus.RUNNING },
     });
     return log.id;
   }
 
-  private async finishLog(
-    logId: string,
-    status: SyncStatus,
-    result: SyncTierResult
-  ): Promise<void> {
-    await prisma.syncExecutionLog.update({
-      where: { id: logId },
-      data: {
-        status,
-        finishedAt:     new Date(),
-        ordersFound:    result.ordersFound,
-        ordersUpserted: result.ordersUpserted,
-        errorDetail:    result.errorDetail,
-      },
-    });
+  private async finishLog(logId: string, status: SyncStatus, result: SyncTierResult): Promise<void> {
+    try {
+      await prisma.syncExecutionLog.update({
+        where: { id: logId },
+        data:  {
+          status,
+          finishedAt:     new Date(),
+          ordersFound:    result.ordersFound,
+          ordersUpserted: result.ordersUpserted,
+          errorDetail:    result.errorDetail,
+        },
+      });
+    } catch (err: any) {
+      // P2025 = record not found (log apagado externamente) — não é crítico
+      if (err?.code === "P2025") {
+        console.warn(`[SyncEngine] finishLog: log ${logId} não encontrado — ignorando`);
+        return;
+      }
+      console.error(`[SyncEngine] finishLog erro:`, err?.message);
+    }
   }
 }
 
