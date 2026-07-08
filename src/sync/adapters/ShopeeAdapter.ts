@@ -1,12 +1,4 @@
 // src/sync/adapters/ShopeeAdapter.ts
-//
-// Adapter da Shopee para o SyncEngine.
-// Particularidades encapsuladas aqui:
-// - Assinatura HMAC-SHA256 em cada request
-// - Paginação por cursor (sem limite de offset)
-// - Janela máxima de 15 dias por chamada (fatiamento automático)
-// - Batch de até 50 order_sn no get_order_detail
-// - Access token expira em 4h (refresh automático)
 
 import axios from "axios";
 import crypto from "crypto";
@@ -25,14 +17,11 @@ import { encrypt, decrypt } from "../../lib/crypto";
 const SHOPEE_BASE = process.env.NODE_ENV === "production"
   ? "https://openplatform.shopee.com.br"
   : "https://partner.test-stable.shopeemobile.com";
-const PARTNER_ID   = parseInt(process.env.SHOPEE_PARTNER_ID!);
-const PARTNER_KEY  = process.env.SHOPEE_PARTNER_KEY!;
+const PARTNER_ID  = parseInt(process.env.SHOPEE_PARTNER_ID!);
+const PARTNER_KEY = process.env.SHOPEE_PARTNER_KEY!;
 
-// Janela máxima permitida pela Shopee por chamada (15 dias em segundos)
 const MAX_WINDOW_SECONDS = 15 * 24 * 60 * 60;
-
-// Proteção contra refresh concorrente do mesmo token
-const refreshInFlight = new Map<string, Promise<TokenPair>>();
+const refreshInFlight    = new Map<string, Promise<TokenPair>>();
 
 export class ShopeeAdapter implements ChannelSyncAdapter {
   readonly channelType = ChannelType.SHOPEE;
@@ -44,7 +33,12 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
     return crypto.createHmac("sha256", PARTNER_KEY).update(base).digest("hex");
   }
 
-  private buildUrl(path: string, accessToken: string, shopId: string, extraParams: Record<string, any> = {}): string {
+  private buildUrl(
+    path: string,
+    accessToken: string,
+    shopId: string,
+    extraParams: Record<string, any> = {}
+  ): string {
     const timestamp = Math.floor(Date.now() / 1000);
     const sign      = this.sign(path, timestamp, accessToken, shopId);
 
@@ -56,9 +50,7 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
     url.searchParams.set("shop_id",      shopId);
 
     for (const [k, v] of Object.entries(extraParams)) {
-      if (v !== undefined && v !== null) {
-        url.searchParams.set(k, String(v));
-      }
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
     }
     return url.toString();
   }
@@ -66,12 +58,8 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
   // ─── TOKEN ──────────────────────────────────────────────────────────────────
 
   async refreshTokenForAccount(account: ChannelAccount): Promise<TokenPair> {
-    if (refreshInFlight.has(account.id)) {
-      return refreshInFlight.get(account.id)!;
-    }
-    const promise = this._doRefresh(account).finally(() =>
-      refreshInFlight.delete(account.id)
-    );
+    if (refreshInFlight.has(account.id)) return refreshInFlight.get(account.id)!;
+    const promise = this._doRefresh(account).finally(() => refreshInFlight.delete(account.id));
     refreshInFlight.set(account.id, promise);
     return promise;
   }
@@ -111,21 +99,17 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
 
   private async getAccessToken(account: ChannelAccount): Promise<string> {
     const expiresInMs = account.tokenExpiresAt.getTime() - Date.now();
-    if (expiresInMs < 30 * 60 * 1000) { // renova se expira em menos de 30min
-      const refreshed = await this.refreshTokenForAccount(account);
-      return refreshed.accessToken;
+    if (expiresInMs < 30 * 60 * 1000) {
+      return (await this.refreshTokenForAccount(account)).accessToken;
     }
     return decrypt(account.accessTokenEnc);
   }
 
   // ─── FATIAMENTO DE JANELA ────────────────────────────────────────────────────
-  // A Shopee limita cada chamada a 15 dias. Se o range for maior,
-  // fatia automaticamente em sub-janelas de 15 dias.
 
   private splitIntoWindows(since: Date, until: Date): Array<{ from: Date; to: Date }> {
     const windows: Array<{ from: Date; to: Date }> = [];
     let cursor = new Date(since);
-
     while (cursor < until) {
       const windowEnd = new Date(
         Math.min(cursor.getTime() + MAX_WINDOW_SECONDS * 1000, until.getTime())
@@ -142,10 +126,9 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
     account: ChannelAccount,
     since?: Date
   ): AsyncGenerator<NormalizedOrder[]> {
-    // Backfill dos últimos 90 dias (limite prático da Shopee pra histórico)
-    const until     = new Date();
-    const fromDate  = since ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    const windows   = this.splitIntoWindows(fromDate, until);
+    const until    = new Date();
+    const fromDate = since ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    const windows  = this.splitIntoWindows(fromDate, until);
 
     for (const window of windows) {
       yield* this.fetchOrdersInWindow(account, window.from, window.to, "create_time");
@@ -175,7 +158,6 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
   ): AsyncGenerator<NormalizedOrder[]> {
     const accessToken = await this.getAccessToken(account);
     const shopId      = account.externalAccountId;
-
     let cursor: string | undefined = undefined;
     const pageSize = 100;
 
@@ -193,13 +175,13 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
 
       const data      = res.data?.response;
       const orderList = data?.order_list ?? [];
-
       if (orderList.length === 0) break;
 
-      // Busca detalhes em lotes de 50
       const orderSns: string[] = orderList.map((o: any) => o.order_sn);
       const details             = await this.fetchOrderDetails(account, accessToken, shopId, orderSns);
-      const normalized          = details.map((d) => this.normalizeSingle(d, account)).filter(Boolean) as NormalizedOrder[];
+      const normalized          = details
+        .map((d) => this.normalizeSingle(d, account))
+        .filter(Boolean) as NormalizedOrder[];
 
       if (normalized.length > 0) yield normalized;
 
@@ -218,7 +200,6 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
     const shopId      = account.externalAccountId;
     const results: NormalizedOrder[] = [];
 
-    // Agrupa em lotes de 50 (limite da Shopee)
     for (let i = 0; i < externalOrderIds.length; i += 50) {
       const batch   = externalOrderIds.slice(i, i + 50);
       const details = await this.fetchOrderDetails(account, accessToken, shopId, batch);
@@ -241,7 +222,7 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
     orderSns: string[]
   ): Promise<any[]> {
     const url = this.buildUrl("/api/v2/order/get_order_detail", accessToken, shopId, {
-      order_sn_list:          orderSns.join(","),
+      order_sn_list:            orderSns.join(","),
       response_optional_fields: "buyer_info,payment_method,shipping_carrier,actual_shipping_fee,items,package_list",
     });
 
@@ -265,25 +246,30 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
       quantity:       i.model_quantity_purchased ?? 1,
       unitPrice:      i.model_discounted_price ?? i.model_original_price ?? 0,
       sku:            i.model_sku || i.item_sku || null,
-      saleFee:        0, // Shopee não retorna saleFee direto no pedido
+      saleFee:        0,
     }));
 
+    // ── Pagamentos ────────────────────────────────────────────────────────────
+    // Shopee não tem payment_id separado — usa order_sn como identificador
     const payments: NormalizedPayment[] = raw.payment_method ? [{
-      externalPaymentId: raw.order_sn, // Shopee não tem payment_id separado
+      externalPaymentId: raw.order_sn,
       status:            raw.order_status ?? "",
       totalPaidAmount:   raw.total_amount ?? 0,
+      netReceivedAmount: null,   // Shopee não fornece valor líquido via API
       taxesAmount:       0,
       operationType:     "regular_payment",
       paymentMethodId:   raw.payment_method ?? null,
+      installments:      null,   // Shopee não retorna parcelas
       moneyReleaseDate:  raw.actual_shipping_fee_confirmed
         ? new Date(raw.pay_time * 1000)
         : null,
     }] : [];
 
+    // ── Envio ─────────────────────────────────────────────────────────────────
     let shipment: NormalizedShipment | null = null;
     if (raw.shipping_carrier || raw.package_list?.[0]?.tracking_no) {
       shipment = {
-        externalShipmentId: raw.package_list?.[0]?.package_number ?? null,
+        externalShipmentId: raw.package_list?.[0]?.package_number ?? raw.order_sn,
         status:             raw.order_status ?? "",
         trackingNumber:     raw.package_list?.[0]?.tracking_no ?? null,
         cost:               raw.actual_shipping_fee ?? null,
@@ -299,6 +285,7 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
       dateCreated:      new Date(raw.create_time * 1000),
       dateLastUpdated:  new Date(raw.update_time * 1000),
       totalAmount:      raw.total_amount ?? 0,
+      paidAmount:       raw.total_amount ?? null,    // Shopee: total_amount já é o valor pago
       netReceived:      raw.estimated_shipping_fee
         ? raw.total_amount - raw.estimated_shipping_fee
         : null,
@@ -306,11 +293,12 @@ export class ShopeeAdapter implements ChannelSyncAdapter {
       shippingCost:     raw.actual_shipping_fee ?? raw.estimated_shipping_fee ?? null,
       shippingDiscount: 0,
       buyerName:        raw.buyer_info?.buyer_username ?? null,
+      buyerNickname:    raw.buyer_info?.buyer_username ?? null,  // Shopee usa username como identificador
       buyerDocType:     null,
       buyerDocNumber:   null,
-      buyerCity:        raw.recipient_address?.city ?? null,
+      buyerCity:        raw.recipient_address?.city  ?? null,
       buyerState:       raw.recipient_address?.state ?? null,
-      packId:           null, // Shopee não tem conceito de pack
+      packId:           null,
       items,
       payments,
       shipment,
