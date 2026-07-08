@@ -324,6 +324,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     let buyerDocNumber: string | null = null;
 
     const billingInfoId = raw.buyer?.billing_info?.id ?? raw.billing_info?.id ?? null;
+	console.log(`[ML][Debug] Pedido ${raw.id} — billing_info_id: ${billingInfoId} — buyer: ${JSON.stringify(raw.buyer).slice(0, 150)}`);
     if (billingInfoId) {
       const billing  = await this.fetchBillingInfo(ml, String(billingInfoId));
       buyerName      = billing.name;
@@ -455,42 +456,46 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   // ─── ENDPOINT: BILLING INFO ───────────────────────────────────────────────────
 
-  private async fetchBillingInfo(
-    ml: AxiosInstance,
-    billingInfoId: string
-  ): Promise<{ name: string | null; docType: string | null; docNumber: string | null }> {
-    // Novo endpoint primeiro
+private async fetchBillingInfo(
+  ml: AxiosInstance,
+  billingInfoId: string
+): Promise<{ name: string | null; docType: string | null; docNumber: string | null }> {
+  // Novo endpoint primeiro
+  try {
+    const res  = await withRetry(() =>
+      ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
+    );
+    console.log(`[ML][BillingInfo] Novo endpoint OK:`, JSON.stringify(res.data).slice(0, 300));
+    const data = res.data;
+    const name = [data?.first_name, data?.last_name].filter(Boolean).join(" ") || data?.name || null;
+    return {
+      name,
+      docType:   data?.identification?.type   ?? data?.doc_type   ?? null,
+      docNumber: data?.identification?.number ?? data?.doc_number ?? null,
+    };
+  } catch (err: any) {
+    console.log(`[ML][BillingInfo] Novo endpoint falhou (${err?.response?.status}): ${JSON.stringify(err?.response?.data).slice(0, 200)}`);
+    // Fallback legado
     try {
-      const res  = await withRetry(() =>
-        ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
+      const res = await withRetry(() =>
+        ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
       );
-      const data = res.data;
-      const name = [data?.first_name, data?.last_name].filter(Boolean).join(" ") || data?.name || null;
+      console.log(`[ML][BillingInfo] Legado OK:`, JSON.stringify(res.data).slice(0, 300));
+      const b    = res.data?.buyer?.billing_info ?? res.data;
+      const name = b?.first_name
+        ? [b.first_name, b.last_name].filter(Boolean).join(" ")
+        : null;
       return {
         name,
-        docType:   data?.identification?.type   ?? data?.doc_type   ?? null,
-        docNumber: data?.identification?.number ?? data?.doc_number ?? null,
+        docType:   b?.identification?.type   ?? b?.doc_type   ?? null,
+        docNumber: b?.identification?.number ?? b?.doc_number ?? null,
       };
-    } catch {
-      // Fallback legado
-      try {
-        const res = await withRetry(() =>
-          ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
-        );
-        const b    = res.data?.buyer?.billing_info ?? res.data;
-        const name = b?.first_name
-          ? [b.first_name, b.last_name].filter(Boolean).join(" ")
-          : null;
-        return {
-          name,
-          docType:   b?.identification?.type   ?? b?.doc_type   ?? null,
-          docNumber: b?.identification?.number ?? b?.doc_number ?? null,
-        };
-      } catch {
-        return { name: null, docType: null, docNumber: null };
-      }
+    } catch (err2: any) {
+      console.log(`[ML][BillingInfo] Legado também falhou (${err2?.response?.status}): ${JSON.stringify(err2?.response?.data).slice(0, 200)}`);
+      return { name: null, docType: null, docNumber: null };
     }
   }
+}
 
   // ─── ENDPOINT: MERCADO PAGO ───────────────────────────────────────────────────
 
