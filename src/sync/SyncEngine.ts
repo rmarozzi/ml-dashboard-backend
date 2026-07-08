@@ -3,7 +3,7 @@ import { ChannelAccount, SyncStatus } from "@prisma/client";
 import { ChannelSyncAdapter, NormalizedOrder, SyncTierResult } from "./types";
 
 export class SyncEngine {
-  private adapters          = new Map<string, ChannelSyncAdapter>();
+  private adapters           = new Map<string, ChannelSyncAdapter>();
   private backfillInProgress = new Set<string>();
 
   registerAdapter(adapter: ChannelSyncAdapter): void {
@@ -88,6 +88,13 @@ export class SyncEngine {
         console.log(`[SyncEngine][Tier1] ${ordersUpserted} pedidos atualizados`);
       }
     } catch (err: any) {
+      const status = err?.response?.status;
+      // 400/403 no Tier1 é tolerável — webhooks cobrem atualizações em tempo real
+      if (status === 400 || status === 403) {
+        console.warn(`[SyncEngine][Tier1] ML retornou ${status} — ignorando (webhooks ativos)`);
+        await this.finishLog(logId, SyncStatus.PARTIAL, { ordersFound, ordersUpserted, errorDetail: `HTTP ${status}` });
+        return;
+      }
       console.error(`[SyncEngine][Tier1] Erro:`, err?.message);
       await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
     }
@@ -126,7 +133,7 @@ export class SyncEngine {
     try {
       console.log(`[SyncEngine][Tier2] ${account.channelType} / ${account.id} — ${unsettled.length} pedidos para recheck`);
 
-      const orders = await adapter.recheckOrders(account, unsettled.map((o) => o.externalOrderId));
+      const orders   = await adapter.recheckOrders(account, unsettled.map((o) => o.externalOrderId));
       ordersFound    = orders.length;
       ordersUpserted = await this.persistBatch(orders);
 
@@ -215,8 +222,8 @@ export class SyncEngine {
                 moneyReleaseDate:  payment.moneyReleaseDate,
               },
               update: {
-                status:           payment.status,
-                totalPaidAmount:  payment.totalPaidAmount,
+                status:          payment.status,
+                totalPaidAmount: payment.totalPaidAmount,
                 ...(payment.moneyReleaseDate  != null && { moneyReleaseDate:  payment.moneyReleaseDate }),
                 ...(payment.netReceivedAmount != null && { netReceivedAmount: payment.netReceivedAmount }),
               },

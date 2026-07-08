@@ -11,8 +11,8 @@ import {
   TokenPair,
 } from "../types";
 
-const ML_BASE  = "https://api.mercadolibre.com";
-const MP_BASE  = "https://api.mercadopago.com";
+const ML_BASE       = "https://api.mercadolibre.com";
+const MP_BASE       = "https://api.mercadopago.com";
 const CLIENT_ID     = process.env.ML_CLIENT_ID!;
 const CLIENT_SECRET = process.env.ML_CLIENT_SECRET!;
 const SITE_ID       = "MLB";
@@ -40,7 +40,6 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
-// Retry com backoff exponencial para 429 e linear para 5xx
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   let attempt = 0;
   while (true) {
@@ -60,7 +59,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   }
 }
 
-// ─── CACHE DE SHIPMENT ───────────────────────────────────────────────────────
+// ─── TIPOS INTERNOS ──────────────────────────────────────────────────────────
 
 interface ShipmentData {
   status:         string;
@@ -76,11 +75,19 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   readonly channelType = ChannelType.MERCADO_LIVRE;
 
   private mlClient(token: string): AxiosInstance {
-    return axios.create({ baseURL: ML_BASE, headers: { Authorization: `Bearer ${token}` }, timeout: 20000 });
+    return axios.create({
+      baseURL: ML_BASE,
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 20000,
+    });
   }
 
   private mpClient(token: string): AxiosInstance {
-    return axios.create({ baseURL: MP_BASE, headers: { Authorization: `Bearer ${token}` }, timeout: 20000 });
+    return axios.create({
+      baseURL: MP_BASE,
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 20000,
+    });
   }
 
   // ─── TOKEN ──────────────────────────────────────────────────────────────────
@@ -94,7 +101,9 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   private async _doRefresh(account: ChannelAccount): Promise<TokenPair> {
     const res = await axios.post(`${ML_BASE}/oauth/token`, {
-      grant_type: "refresh_token", client_id: CLIENT_ID, client_secret: CLIENT_SECRET,
+      grant_type:    "refresh_token",
+      client_id:     CLIENT_ID,
+      client_secret: CLIENT_SECRET,
       refresh_token: decrypt(account.refreshTokenEnc),
     });
     const pair: TokenPair = {
@@ -104,7 +113,11 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     };
     await prisma.channelAccount.update({
       where: { id: account.id },
-      data:  { accessTokenEnc: encrypt(pair.accessToken), refreshTokenEnc: encrypt(pair.refreshToken), tokenExpiresAt: pair.expiresAt },
+      data: {
+        accessTokenEnc:  encrypt(pair.accessToken),
+        refreshTokenEnc: encrypt(pair.refreshToken),
+        tokenExpiresAt:  pair.expiresAt,
+      },
     });
     console.log(`[ML] Token renovado para conta ${account.id}. Expira: ${pair.expiresAt.toISOString()}`);
     return pair;
@@ -112,18 +125,20 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   private async getAccessToken(account: ChannelAccount): Promise<string> {
     const expiresIn = account.tokenExpiresAt.getTime() - Date.now();
-    if (expiresIn < 60 * 60 * 1000) return (await this.refreshTokenForAccount(account)).accessToken;
+    if (expiresIn < 60 * 60 * 1000) {
+      return (await this.refreshTokenForAccount(account)).accessToken;
+    }
     return decrypt(account.accessTokenEnc);
   }
 
   // ─── TIER 0 — BACKFILL ──────────────────────────────────────────────────────
 
   async *backfillHistorical(account: ChannelAccount): AsyncGenerator<NormalizedOrder[]> {
-    const token  = await this.getAccessToken(account);
-    const ml     = this.mlClient(token);
-    const mp     = this.mpClient(token);
-    let offset   = 0;
-    const limit  = 50;
+    const token = await this.getAccessToken(account);
+    const ml    = this.mlClient(token);
+    const mp    = this.mpClient(token);
+    let offset  = 0;
+    const limit = 50;
 
     while (true) {
       if (offset > 9950) {
@@ -133,7 +148,12 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
       const res = await withRetry(() =>
         ml.get("/orders/search", {
-          params: { seller: account.externalAccountId, sort: "date_desc", offset, limit },
+          params: {
+            seller: account.externalAccountId,
+            sort:   "date_desc",
+            offset,
+            limit,
+          },
         })
       );
 
@@ -150,12 +170,16 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   // ─── TIER 1 — INCREMENTAL ───────────────────────────────────────────────────
 
-  async *discoverUpdatedOrders(account: ChannelAccount, since: Date, until: Date): AsyncGenerator<NormalizedOrder[]> {
-    const token  = await this.getAccessToken(account);
-    const ml     = this.mlClient(token);
-    const mp     = this.mpClient(token);
-    let offset   = 0;
-    const limit  = 50;
+  async *discoverUpdatedOrders(
+    account: ChannelAccount,
+    since: Date,
+    until: Date
+  ): AsyncGenerator<NormalizedOrder[]> {
+    const token = await this.getAccessToken(account);
+    const ml    = this.mlClient(token);
+    const mp    = this.mpClient(token);
+    let offset  = 0;
+    const limit = 50;
 
     while (true) {
       if (offset > 9950) break;
@@ -163,11 +187,12 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const res = await withRetry(() =>
         ml.get("/orders/search", {
           params: {
-            // Sem seller — token já identifica o vendedor
-            // Passar seller + filtros de data causa erro 400/403
+            seller:                         account.externalAccountId,
             "order.date_last_updated.from": since.toISOString(),
             "order.date_last_updated.to":   until.toISOString(),
-            sort: "date_last_updated_asc", offset, limit,
+            sort:                           "date_last_updated_asc",
+            offset,
+            limit,
           },
         })
       );
@@ -185,7 +210,10 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   // ─── TIER 2 — RECHECK ───────────────────────────────────────────────────────
 
-  async recheckOrders(account: ChannelAccount, externalOrderIds: string[]): Promise<NormalizedOrder[]> {
+  async recheckOrders(
+    account: ChannelAccount,
+    externalOrderIds: string[]
+  ): Promise<NormalizedOrder[]> {
     const token = await this.getAccessToken(account);
     const ml    = this.mlClient(token);
     const mp    = this.mpClient(token);
@@ -206,15 +234,15 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   // ─── WEBHOOK ─────────────────────────────────────────────────────────────────
 
   async handleWebhook(account: ChannelAccount, payload: any): Promise<NormalizedOrder | null> {
-    const orderId = payload?.resource?.replace("/orders/", "") ?? payload?.id;
-    if (!orderId) return null;
+    const orderId = payload?.id ?? String(payload?.resource ?? "").replace("/orders/", "").trim();
+    if (!orderId || isNaN(Number(orderId))) return null;
 
     const token = await this.getAccessToken(account);
     const ml    = this.mlClient(token);
     const mp    = this.mpClient(token);
 
     try {
-      const res = await withRetry(() => ml.get(`/orders/${orderId}`));
+      const res        = await withRetry(() => ml.get(`/orders/${orderId}`));
       const normalized = await this.normalizeSingle(res.data, account, ml, mp, new Map());
       return normalized;
     } catch (err: any) {
@@ -274,7 +302,9 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     const shipmentId = raw.shipping?.id ? String(raw.shipping.id) : null;
 
     // ── Shipment (usa cache) ──────────────────────────────────────────────────
-    let shipmentData: ShipmentData = { status: "", trackingNumber: null, city: null, state: null, cost: null };
+    let shipmentData: ShipmentData = {
+      status: "", trackingNumber: null, city: null, state: null, cost: null,
+    };
     if (shipmentId) {
       shipmentData = shipmentCache.get(shipmentId) ?? await this.fetchShipmentData(ml, shipmentId);
     }
@@ -282,18 +312,20 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     // ── Rateio de frete por pack ──────────────────────────────────────────────
     let shippingCost = shipmentData.cost;
     if (raw.pack_id && shippingCost != null) {
-      shippingCost = await this.getProportionalShippingCost(String(raw.pack_id), orderId, shippingCost);
+      shippingCost = await this.getProportionalShippingCost(
+        String(raw.pack_id), orderId, shippingCost
+      );
     }
 
     // ── Billing info — nome real + CPF/CNPJ ──────────────────────────────────
-    // Novo endpoint: pega billing_info_id do order e consulta o endpoint dedicado
+    // Novo endpoint: pega billing_info_id do order e consulta endpoint dedicado
     let buyerName:      string | null = null;
     let buyerDocType:   string | null = null;
     let buyerDocNumber: string | null = null;
 
     const billingInfoId = raw.buyer?.billing_info?.id ?? raw.billing_info?.id ?? null;
     if (billingInfoId) {
-      const billing = await this.fetchBillingInfo(ml, String(billingInfoId));
+      const billing  = await this.fetchBillingInfo(ml, String(billingInfoId));
       buyerName      = billing.name;
       buyerDocType   = billing.docType;
       buyerDocNumber = billing.docNumber;
@@ -310,7 +342,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       raw.payments ?? [],
       CONCURRENCY,
       async (p: any) => {
-        let moneyReleaseDate: Date | null  = p.money_release_date ? new Date(p.money_release_date) : null;
+        let moneyReleaseDate:  Date | null   = p.money_release_date ? new Date(p.money_release_date) : null;
         let netReceivedAmount: number | null = p.net_received_amount ?? null;
 
         // Busca dados detalhados do Mercado Pago quando necessário
@@ -390,13 +422,12 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── ENDPOINT: SHIPMENT ──────────────────────────────────────────────────────
-  // GET /shipments/{id} com x-format-new: true
-  // GET /shipments/{id}/costs para custo do vendedor
-  // Ambos em paralelo
 
   private async fetchShipmentData(ml: AxiosInstance, shipmentId: string): Promise<ShipmentData> {
     const [shipRes, costRes] = await Promise.allSettled([
-      withRetry(() => ml.get(`/shipments/${shipmentId}`, { headers: { "x-format-new": "true" } })),
+      withRetry(() =>
+        ml.get(`/shipments/${shipmentId}`, { headers: { "x-format-new": "true" } })
+      ),
       withRetry(() => ml.get(`/shipments/${shipmentId}/costs`)),
     ]);
 
@@ -414,7 +445,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
     let cost: number | null = null;
     if (costRes.status === "fulfilled") {
-      const d = costRes.value.data;
+      const d          = costRes.value.data;
       const sellerCost = d?.senders?.[0]?.cost;
       cost = (sellerCost != null && sellerCost > 0) ? sellerCost : (d?.gross_amount ?? null);
     }
@@ -422,39 +453,36 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     return { status, trackingNumber, city, state, cost };
   }
 
-  // ─── ENDPOINT: BILLING INFO (NOVO) ───────────────────────────────────────────
-  // Novo fluxo: billing_info_id vem do /orders no buyer.billing_info.id
-  // GET /orders/billing-info/{site_id}/{billing_info_id}
-  // Fallback: GET /orders/{id}/billing_info (legado, depreciado)
+  // ─── ENDPOINT: BILLING INFO ───────────────────────────────────────────────────
 
   private async fetchBillingInfo(
     ml: AxiosInstance,
     billingInfoId: string
   ): Promise<{ name: string | null; docType: string | null; docNumber: string | null }> {
-    // Tenta o novo endpoint primeiro
+    // Novo endpoint primeiro
     try {
-      const res = await withRetry(() =>
+      const res  = await withRetry(() =>
         ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
       );
       const data = res.data;
-      const fullName = [data?.first_name, data?.last_name].filter(Boolean).join(" ") || data?.name || null;
+      const name = [data?.first_name, data?.last_name].filter(Boolean).join(" ") || data?.name || null;
       return {
-        name:      fullName,
+        name,
         docType:   data?.identification?.type   ?? data?.doc_type   ?? null,
         docNumber: data?.identification?.number ?? data?.doc_number ?? null,
       };
     } catch {
-      // Fallback para endpoint legado
+      // Fallback legado
       try {
         const res = await withRetry(() =>
           ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
         );
-        const b = res.data?.buyer?.billing_info ?? res.data;
-        const fullName = b?.first_name
+        const b    = res.data?.buyer?.billing_info ?? res.data;
+        const name = b?.first_name
           ? [b.first_name, b.last_name].filter(Boolean).join(" ")
           : null;
         return {
-          name:      fullName,
+          name,
           docType:   b?.identification?.type   ?? b?.doc_type   ?? null,
           docNumber: b?.identification?.number ?? b?.doc_number ?? null,
         };
@@ -465,8 +493,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── ENDPOINT: MERCADO PAGO ───────────────────────────────────────────────────
-  // GET https://api.mercadopago.com/v1/payments/{id}
-  // Retorna money_release_date e net_amount mais confiáveis
 
   private async fetchMercadoPagoPayment(mp: AxiosInstance, paymentId: string): Promise<any | null> {
     try {
@@ -479,7 +505,11 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
 
   // ─── RATEIO DE FRETE POR PACK ────────────────────────────────────────────────
 
-  private async getProportionalShippingCost(packId: string, orderId: string, fullCost: number): Promise<number> {
+  private async getProportionalShippingCost(
+    packId: string,
+    orderId: string,
+    fullCost: number
+  ): Promise<number> {
     try {
       const orders = await prisma.order.findMany({
         where:  { packId },
