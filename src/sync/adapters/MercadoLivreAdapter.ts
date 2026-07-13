@@ -270,7 +270,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     });
 
     // 2. Cache de shipment por shipmentId único
-    //    Packs compartilham o mesmo shipmentId — busca 1x só
     const uniqueShipmentIds = [...new Set(
       detailed.map((o) => o.shipping?.id).filter(Boolean).map(String)
     )];
@@ -318,7 +317,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     }
 
     // ── Billing info — nome real + CPF/CNPJ ──────────────────────────────────
-    // Novo endpoint: pega billing_info_id do order e consulta endpoint dedicado
     let buyerName:      string | null = null;
     let buyerDocType:   string | null = null;
     let buyerDocNumber: string | null = null;
@@ -345,7 +343,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
         let moneyReleaseDate:  Date | null   = p.money_release_date ? new Date(p.money_release_date) : null;
         let netReceivedAmount: number | null = p.net_received_amount ?? null;
 
-        // Busca dados detalhados do Mercado Pago quando necessário
         if (p.id && (!moneyReleaseDate || !netReceivedAmount)) {
           const mpData = await this.fetchMercadoPagoPayment(mp, String(p.id));
           if (mpData) {
@@ -389,7 +386,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       };
     }
 
-    // ── Net received — soma dos pagamentos regulares ───────────────────────────
+    // ── Net received ──────────────────────────────────────────────────────────
     const netReceived = payments
       .filter((p) => p.operationType === "regular_payment" && p.netReceivedAmount != null)
       .reduce((acc, p) => acc + (p.netReceivedAmount ?? 0), 0) || null;
@@ -454,44 +451,46 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── ENDPOINT: BILLING INFO ───────────────────────────────────────────────────
+  // ✅ FIX: estrutura correta é res.data.buyer.billing_info (não res.data diretamente)
 
-private async fetchBillingInfo(
-  ml: AxiosInstance,
-  billingInfoId: string
-): Promise<{ name: string | null; docType: string | null; docNumber: string | null }> {
-  // Novo endpoint primeiro
-  try {
-    const res  = await withRetry(() =>
-      ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
-    );
-    const data = res.data;
-    const name = [data?.first_name, data?.last_name].filter(Boolean).join(" ") || data?.name || null;
-    return {
-      name,
-      docType:   data?.identification?.type   ?? data?.doc_type   ?? null,
-      docNumber: data?.identification?.number ?? data?.doc_number ?? null,
-    };
-  } catch (err: any) {
-    
-    // Fallback legado
+  private async fetchBillingInfo(
+    ml: AxiosInstance,
+    billingInfoId: string
+  ): Promise<{ name: string | null; docType: string | null; docNumber: string | null }> {
     try {
-      const res = await withRetry(() =>
-        ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
+      const res     = await withRetry(() =>
+        ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
       );
-      const b    = res.data?.buyer?.billing_info ?? res.data;
-      const name = b?.first_name
-        ? [b.first_name, b.last_name].filter(Boolean).join(" ")
-        : null;
+      // ✅ Estrutura real: res.data.buyer.billing_info.name + last_name
+      const billing = res.data?.buyer?.billing_info;
+      const name    = billing?.name && billing?.last_name
+        ? `${billing.name} ${billing.last_name}`.trim()
+        : billing?.name ?? null;
       return {
         name,
-        docType:   b?.identification?.type   ?? b?.doc_type   ?? null,
-        docNumber: b?.identification?.number ?? b?.doc_number ?? null,
+        docType:   billing?.identification?.type   ?? null,
+        docNumber: billing?.identification?.number ?? null,
       };
-    } catch (err2: any) {
-      return { name: null, docType: null, docNumber: null };
+    } catch {
+      // Fallback legado
+      try {
+        const res = await withRetry(() =>
+          ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
+        );
+        const b    = res.data?.buyer?.billing_info ?? res.data;
+        const name = b?.first_name
+          ? [b.first_name, b.last_name].filter(Boolean).join(" ")
+          : null;
+        return {
+          name,
+          docType:   b?.identification?.type   ?? b?.doc_type   ?? null,
+          docNumber: b?.identification?.number ?? b?.doc_number ?? null,
+        };
+      } catch {
+        return { name: null, docType: null, docNumber: null };
+      }
     }
   }
-}
 
   // ─── ENDPOINT: MERCADO PAGO ───────────────────────────────────────────────────
 
