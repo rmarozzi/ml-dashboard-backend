@@ -14,9 +14,9 @@ import {
 } from "../types";
 import { encrypt, decrypt } from "../../lib/crypto";
 
-const SHOPEE_BASE = process.env.NODE_ENV === "production"
-  ? "https://openplatform.shopee.com.br"
-  : "https://partner.test-stable.shopeemobile.com";
+const SHOPEE_BASE = process.env.SHOPEE_ENV === "test"
+  ? "https://partner.test-stable.shopeemobile.com"
+  : "https://openplatform.shopee.com.br";
 const PARTNER_ID  = parseInt(process.env.SHOPEE_PARTNER_ID!);
 const PARTNER_KEY = process.env.SHOPEE_PARTNER_KEY!;
 
