@@ -187,5 +187,50 @@ router.get("/profit", requireAuth, requirePlan("prata"), requireFuncionarioPermi
 
   return res.json({ orders: result });
 });
+// GET /orders/by-shipment/:shipmentId — busca pedido pelo ID do envio
+router.get("/by-shipment/:shipmentId", requireAuth, async (req, res) => {
+  const liderId = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
+  const canViewProfit = req.user.role === "admin" || req.user.subscription?.plan?.canViewProfit;
 
+  const shipment = await prisma.shipment.findFirst({
+    where: { externalShipmentId: req.params.shipmentId },
+    include: {
+      order: {
+        include: {
+          items:          true,
+          payments:       true,
+          channelAccount: { select: { apelido: true, externalNickname: true, channelType: true } },
+        },
+      },
+    },
+  });
+
+  if (!shipment || shipment.order.userId !== liderId) {
+    return res.status(404).json({ message: "Pedido não encontrado" });
+  }
+
+  const order = shipment.order;
+  const p     = canViewProfit ? await calculateOrderProfit(order.id) : null;
+
+  return res.json({
+    order: {
+      ...order,
+      mlId:  order.mlId ?? order.externalOrderId,
+      token: {
+        apelido:    order.channelAccount?.apelido ?? order.channelAccount?.externalNickname ?? null,
+        mlNickname: order.channelAccount?.externalNickname ?? null,
+      },
+      profit:      p ? Math.round(p.profit      * 100) / 100 : null,
+      margin:      p ? p.margin                              : null,
+      mlFee:       p ? Math.round(p.mlFee       * 100) / 100 : null,
+      shippingCost: p ? Math.round(p.shippingCost * 100) / 100 : null,
+      mlTax:       p ? Math.round(p.mlTax       * 100) / 100 : null,
+      nfTax:       p ? Math.round(p.nfTax       * 100) / 100 : null,
+      productCost: p ? Math.round(p.productCost * 100) / 100 : null,
+      estorno:     p ? Math.round(p.estorno     * 100) / 100 : null,
+      allCostsFound: p ? p.allCostsFound : true,
+      missingSkus: order.items.filter((i) => !i.sku).map((i) => i.title),
+    },
+  });
+});
 export default router;
