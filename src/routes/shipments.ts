@@ -1,7 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { requireAuth, requireFuncionarioPermission } from "../middlewares/auth";
-import { filterMlAccounts } from "../lib/filterMlAccounts";
 
 const router = Router();
 
@@ -12,50 +11,77 @@ router.get("/", requireAuth, requireFuncionarioPermission("view_shipments"), asy
     costMin, costMax,
   } = req.query as Record<string, string>;
 
-  const tokenIds = await filterMlAccounts(req.user);
+  const liderId = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
 
-  const where: any = { order: { tokenId: { in: tokenIds } } };
+  const where: any = { order: { userId: liderId } };
+
   if (status) where.status = status;
   if (search) {
-    where.mlShipmentId = { contains: search, mode: "insensitive" };
+    where.OR = [
+      { externalShipmentId: { contains: search, mode: "insensitive" } },
+      { trackingNumber:     { contains: search, mode: "insensitive" } },
+    ];
   }
-  if (costMin || costMax) {
-    where.cost = {};
-    if (costMin) where.cost.gte = parseFloat(costMin);
-    if (costMax) where.cost.lte = parseFloat(costMax);
-  }
+  if (costMin) where.cost = { ...where.cost, gte: parseFloat(costMin) };
+  if (costMax) where.cost = { ...where.cost, lte: parseFloat(costMax) };
 
-  const pageNum = parseInt(page);
+  const pageNum  = parseInt(page);
   const limitNum = Math.min(parseInt(limit) || 50, 200);
-  const skip = (pageNum - 1) * limitNum;
+  const skip     = (pageNum - 1) * limitNum;
 
-  const dbSortFields = ["dateCreated", "status", "cost"];
-  const orderBy: any = dbSortFields.includes(sortField)
-    ? { [sortField]: sortDir === "asc" ? "asc" : "desc" }
-    : { dateCreated: "desc" };
+  const validSortFields: Record<string, any> = {
+    dateCreated: { order: { dateCreated: sortDir === "asc" ? "asc" : "desc" } },
+    status:      { status: sortDir === "asc" ? "asc" : "desc" },
+    cost:        { cost:   sortDir === "asc" ? "asc" : "desc" },
+  };
+  const orderBy = validSortFields[sortField] ?? { order: { dateCreated: "desc" } };
 
-  const total = await prisma.shipment.count({ where });
-
-  const shipments = await prisma.shipment.findMany({
-    where,
-    include: {
-      order: {
-        include: { token: { select: { apelido: true, mlNickname: true } } },
+  const [total, shipments] = await Promise.all([
+    prisma.shipment.count({ where }),
+    prisma.shipment.findMany({
+      where,
+      include: {
+        order: {
+          select: {
+            id:              true,
+            mlId:            true,
+            externalOrderId: true,
+            packId:          true,
+            dateCreated:     true,
+            channelAccount:  {
+              select: { apelido: true, externalNickname: true, channelType: true },
+            },
+          },
+        },
       },
+      orderBy,
+      skip,
+      take: limitNum,
+    }),
+  ]);
+
+  const result = shipments.map((s) => ({
+    id:              s.id,
+    mlShipmentId:    s.externalShipmentId,
+    status:          s.status,
+    trackingNumber:  s.trackingNumber,
+    cost:            s.cost,
+    dateCreated:     s.order.dateCreated,
+    token: {
+      apelido:    s.order.channelAccount?.apelido ?? s.order.channelAccount?.externalNickname ?? null,
+      mlNickname: s.order.channelAccount?.externalNickname ?? null,
     },
-    orderBy,
-    skip,
-    take: limitNum,
-  });
+    order: {
+      id:    s.order.id,
+      mlId:  s.order.packId ?? s.order.mlId ?? s.order.externalOrderId,
+    },
+  }));
 
   return res.json({
-    shipments: shipments.map((s) => ({
-      ...s,
-      token: s.order.token,
-    })),
+    shipments:  result,
     total,
-    page: pageNum,
-    limit: limitNum,
+    page:       pageNum,
+    limit:      limitNum,
     totalPages: Math.ceil(total / limitNum),
   });
 });
