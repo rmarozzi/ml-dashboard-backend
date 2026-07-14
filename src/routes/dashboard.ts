@@ -171,16 +171,16 @@ router.get("/stats", requireAuth, requireFuncionarioPermission("view_orders"), a
       cur.cmv      += m.cmv;
       canalMap.set(canal, cur);
     }
-    const vendaPorCanal = [...canalMap.entries()].map(([canal, v]) => ({
-      canal,
-      qtde:        v.qtde,
-      faturado:    Math.round(v.faturado * 100) / 100,
-      faturadoPct: totalRevenue > 0 ? Math.round((v.faturado / totalRevenue) * 1000) / 10 : 0,
-      cmv:         canViewProfit ? Math.round(v.cmv * 100) / 100 : null,
-      cmvPct:      canViewProfit && v.faturado > 0 ? Math.round((v.cmv / v.faturado) * 1000) / 10 : null,
-      margem:      canViewProfit ? Math.round(v.margem * 100) / 100 : null,
-      margemPct:   canViewProfit && v.faturado > 0 ? Math.round((v.margem / v.faturado) * 1000) / 10 : null,
-    })).sort((a, b) => b.faturado - a.faturado);
+const vendaPorCanal = [...canalMap.entries()].map(([canal, v]) => ({
+  canal,
+  qtd:         v.qtde,  // ← era qtde, agora qtd
+  faturado:    Math.round(v.faturado * 100) / 100,
+  faturadoPct: totalRevenue > 0 ? Math.round((v.faturado / totalRevenue) * 1000) / 10 : 0,
+  cmv:         canViewProfit ? Math.round(v.cmv * 100) / 100 : null,
+  cmvPct:      canViewProfit && v.faturado > 0 ? Math.round((v.cmv / v.faturado) * 1000) / 10 : null,
+  margem:      canViewProfit ? Math.round(v.margem * 100) / 100 : null,
+  margemPct:   canViewProfit && v.faturado > 0 ? Math.round((v.margem / v.faturado) * 1000) / 10 : null,
+})).sort((a, b) => b.faturado - a.faturado);
 
     // ── Venda por estado ──────────────────────────────────────────────────────
     const estadoMap = new Map<string, { qtd: number; faturado: number; margem: number }>();
