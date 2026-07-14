@@ -252,20 +252,20 @@ router.get("/stats", requireAuth, requireFuncionarioPermission("view_orders"), a
     });
 
     return res.json({
-      totalRevenue:    Math.round(totalRevenue * 100) / 100,
-      totalCmv:        totalCmv != null ? Math.round(totalCmv * 100) / 100 : null,
-      totalProfit:     totalProfit != null ? Math.round(totalProfit * 100) / 100 : null,
-      margin:          margin != null ? Math.round(margin * 100) / 100 : null,
-      totalOrders,
-      avgTicket:       Math.round(avgTicket * 100) / 100,
-      monthlyData,
-      statusBreakdown,
-      vendaPorCanal,
-      vendaPorEstado,
-      vendaPorProduto,
-      recentOrders,
-      availableBrands: availableBrands.map((b) => b.marca).filter(Boolean),
-    });
+  totalRevenue:    Math.round((totalRevenue || 0) * 100) / 100,
+  totalCmv:        totalCmv != null ? Math.round(totalCmv * 100) / 100 : 0,
+  totalProfit:     totalProfit != null ? Math.round(totalProfit * 100) / 100 : 0,
+  margin:          margin != null ? Math.round(margin * 100) / 100 : 0,
+  totalOrders:     totalOrders || 0,
+  avgTicket:       Math.round((avgTicket || 0) * 100) / 100,
+  monthlyData:     monthlyData || [],
+  statusBreakdown: statusBreakdown || [],
+  vendaPorCanal:   vendaPorCanal || [],
+  vendaPorEstado:  vendaPorEstado || [],
+  vendaPorProduto: vendaPorProduto || [],
+  recentOrders:    recentOrders || [],
+  availableBrands: availableBrands.map((b) => b.marca).filter(Boolean) || [],
+});
   } catch (err: any) {
     console.error("[Dashboard] Erro:", err?.message);
     return res.status(500).json({ message: err?.message });
