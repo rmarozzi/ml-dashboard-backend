@@ -60,17 +60,17 @@ function verifySignedState(state: string): { userId: number } | null {
 router.get("/connect", requireAuth, (req, res) => {
   const timestamp = Math.floor(Date.now() / 1000);
   const path      = "/api/v2/shop/auth_partner";
-  const base      = `${PARTNER_ID}${path}${timestamp}`;
   const sign      = shopeeSign(path, timestamp);
   const state     = createSignedState(req.user.id);
 
   // Debug temporário
   console.log(`[Shopee Debug] SHOPEE_ENV: ${process.env.SHOPEE_ENV}`);
   console.log(`[Shopee Debug] SHOPEE_BASE: ${SHOPEE_BASE}`);
-  console.log(`[Shopee Debug] PARTNER_ID: ${PARTNER_ID}`);
-  console.log(`[Shopee Debug] PARTNER_KEY (primeiros 10 chars): ${PARTNER_KEY?.slice(0, 10)}`);
+  console.log(`[Shopee Debug] PARTNER_ID raw: "${process.env.SHOPEE_PARTNER_ID}"`);
+  console.log(`[Shopee Debug] PARTNER_ID parsed: ${PARTNER_ID}`);
   console.log(`[Shopee Debug] PARTNER_KEY length: ${PARTNER_KEY?.length}`);
-  console.log(`[Shopee Debug] base string: ${base}`);
+  console.log(`[Shopee Debug] PARTNER_KEY completa: ${PARTNER_KEY}`);
+  console.log(`[Shopee Debug] base string: ${PARTNER_ID}${path}${timestamp}`);
   console.log(`[Shopee Debug] sign: ${sign}`);
 
   const url = new URL(`${SHOPEE_BASE}${path}`);
