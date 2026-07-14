@@ -1,254 +1,198 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
-import { requireAuth } from "../middlewares/auth";
-import { filterMlAccounts, getLiderId } from "../lib/filterMlAccounts";
+import { requireAuth, requireFuncionarioPermission } from "../middlewares/auth";
+import { calculateOrderProfit } from "../lib/profit";
 
 const router = Router();
 
-router.get("/stats", requireAuth, async (req, res) => {
-  const user = req.user;
-  const { brand, dateFrom, dateTo } = req.query as { brand?: string; dateFrom?: string; dateTo?: string };
+router.get("/stats", requireAuth, requireFuncionarioPermission("view_orders"), async (req, res) => {
+  const liderId       = req.user.role === "funcionario" ? req.user.liderId : req.user.id;
+  const canViewProfit = req.user.role === "admin" || req.user.subscription?.plan?.canViewProfit;
 
-  // Aceita várias marcas separadas por vírgula: ?brand=MarcaA,MarcaB
+  const { dateFrom, dateTo, brand } = req.query as Record<string, string>;
   const brands = brand ? brand.split(",").map((b) => b.trim()).filter(Boolean) : [];
 
-  // Intervalo de datas (inclusive nas duas pontas)
-  const startDate = dateFrom ? new Date(dateFrom + "T00:00:00") : null;
-  const endDate = dateTo ? new Date(dateTo + "T23:59:59.999") : null;
-  const dateRangeWhere = (startDate || endDate)
-    ? { dateCreated: { ...(startDate ? { gte: startDate } : {}), ...(endDate ? { lte: endDate } : {}) } }
-    : {};
+  // ── Filtro base ───────────────────────────────────────────────────────────
+  const where: any = { userId: liderId, status: "paid" };
+  if (dateFrom) where.dateCreated = { ...where.dateCreated, gte: new Date(dateFrom) };
+  if (dateTo)   where.dateCreated = { ...where.dateCreated, lte: new Date(new Date(dateTo).setHours(23, 59, 59)) };
 
-  const tokenIds = await filterMlAccounts(user);
-  const liderId = await getLiderId(user);
-  const canViewProfit = user.role === "admin" || user.subscription?.plan?.canViewProfit;
+  // Filtro por marca — via SKU dos itens
+  if (brands.length > 0) {
+    const skusWithBrand = await prisma.productCost.findMany({
+      where: { userId: liderId, marca: { in: brands } },
+      select: { sku: true },
+      distinct: ["sku"],
+    });
+    const skus = skusWithBrand.map((c) => c.sku);
+    where.items = { some: { sku: { in: skus } } };
+  }
 
-const orders = await prisma.order.findMany({
-    where: { tokenId: { in: tokenIds }, status: { not: "cancelled" }, ...dateRangeWhere },
-    include: { items: true, payments: true },
+  // ── Busca pedidos ─────────────────────────────────────────────────────────
+  const orders = await prisma.order.findMany({
+    where,
+    include: {
+      items:          true,
+      payments:       true,
+      channelAccount: { select: { channelType: true, apelido: true, externalNickname: true } },
+    },
     orderBy: { dateCreated: "desc" },
   });
 
-  // ── Custos e alíquota pré-carregados (evita N+1) ──────────────────────────
-  const allCosts = await prisma.productCost.findMany({
-    where: { userId: liderId },
-    orderBy: { validFrom: "asc" },
-  });
-  const costsBySku: Record<string, typeof allCosts> = {};
-  for (const c of allCosts) {
-    if (!costsBySku[c.sku]) costsBySku[c.sku] = [];
-    costsBySku[c.sku].push(c);
-  }
-  function findCost(sku: string, date: Date) {
-    const list = costsBySku[sku];
-    if (!list) return null;
-    let result = null;
-    for (const c of list) { if (c.validFrom <= date) result = c; else break; }
-    return result;
-  }
-
-  const allTaxSettings = await prisma.taxSetting.findMany({
-    where: { userId: liderId },
-    orderBy: { validFrom: "asc" },
-  });
-  function findTaxRate(date: Date): number {
-    let result = 0;
-    for (const t of allTaxSettings) { if (t.validFrom <= date) result = t.rate; else break; }
-    return result;
-  }
-
-// ── Filtro por marca (se selecionado, aceita múltiplas) ─────────────────────
-  let filteredOrders = orders;
-  if (brands.length > 0) {
-    const skusOfBrand = new Set(
-      allCosts.filter((c) => c.marca && brands.includes(c.marca)).map((c) => c.sku)
-    );
-    filteredOrders = orders
-      .map((o) => ({
+  // ── Calcula lucro por pedido ───────────────────────────────────────────────
+  const ordersWithProfit = await Promise.all(
+    orders.map(async (o) => {
+      if (!canViewProfit) return { ...o, profit: null, margin: null, cmv: null };
+      const p = await calculateOrderProfit(o.id);
+      return {
         ...o,
-        items: o.items.filter((i) => i.sku && skusOfBrand.has(i.sku)),
-      }))
-      .filter((o) => o.items.length > 0);
-  }
-
-  // Lista de marcas disponíveis (para popular o dropdown do filtro)
-  const availableBrands = Array.from(
-    new Set(allCosts.filter((c) => c.marca).map((c) => c.marca as string))
-  ).sort();
-
-  function calcProfit(order: typeof orders[number]) {
-    const grossRevenue = order.totalAmount;
-    const mlFee = order.items.reduce((acc, i) => acc + (i.saleFee ?? 0) * i.quantity, 0);
-    const shippingCost = order.shippingCost ?? 0;
-    const mlTax = order.taxesAmount > 0 ? order.taxesAmount : 0;
-    const estorno = order.payments
-      .filter((p) => p.operationType !== "regular_payment")
-      .reduce((acc, p) => acc + (p.totalPaidAmount ?? 0), 0);
-    const taxRate = findTaxRate(order.dateCreated);
-    const nfTax = grossRevenue * (taxRate / 100);
-
-    let productCost = 0;
-    for (const item of order.items) {
-      if (!item.sku) continue;
-      const cost = findCost(item.sku, order.dateCreated);
-      if (!cost) continue;
-      productCost += cost.cost * item.quantity;
-    }
-
-    const profit = grossRevenue - mlFee - shippingCost - nfTax - productCost - mlTax + estorno;
-    const cmv = productCost;
-    return { grossRevenue, cmv, mlFee, shippingCost, nfTax, profit };
-  }
-
-  // ── Totais gerais ──────────────────────────────────────────────────────────
-  const totalRevenue = filteredOrders.reduce((a, o) => a + o.totalAmount, 0);
-  const totalOrders = filteredOrders.length;
-  const avgTicket = totalOrders > 0 ? totalRevenue / totalOrders : 0;
-
-  let totalCmv = 0;
-  let totalProfit = 0;
-  if (canViewProfit) {
-    for (const o of filteredOrders) {
-      const r = calcProfit(o);
-      totalCmv += r.cmv;
-      totalProfit += r.profit;
-    }
-  }
-  const margin = totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0;
-
-  // ── Monthly data (gráfico, últimos 6 meses) ─────────────────────────────────
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  const monthlyOrders = filteredOrders.filter((o) => o.dateCreated >= sixMonthsAgo);
-
-  const monthlyMap: Record<string, { receita: number; lucro: number }> = {};
-  for (const o of monthlyOrders) {
-    const key = o.dateCreated.toISOString().slice(0, 7);
-    if (!monthlyMap[key]) monthlyMap[key] = { receita: 0, lucro: 0 };
-    monthlyMap[key].receita += o.totalAmount;
-    if (canViewProfit) monthlyMap[key].lucro += calcProfit(o).profit;
-  }
-  const monthlyData = Object.entries(monthlyMap)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, v]) => ({
-      mes: new Intl.DateTimeFormat("pt-BR", { month: "short" }).format(new Date(key + "-01")),
-      receita: Math.round(v.receita * 100) / 100,
-      lucro: canViewProfit ? Math.round(v.lucro * 100) / 100 : null,
-    }));
-
-  // ── Status breakdown ─────────────────────────────────────────────────────
-const statusBreakdown = await prisma.order.groupBy({
-    by: ["status"],
-    where: { tokenId: { in: tokenIds }, ...dateRangeWhere },
-    _count: { id: true },
-  });
-
-  // ── Recent orders ─────────────────────────────────────────────────────────
-  const recentOrders = await Promise.all(
-    filteredOrders.slice(0, 10).map(async (order) => {
-      let profit = null, margin = null;
-      if (canViewProfit) {
-        const r = calcProfit(order);
-        profit = Math.round(r.profit * 100) / 100;
-        margin = order.totalAmount > 0 ? Math.round((r.profit / order.totalAmount) * 1000) / 10 : 0;
-      }
-      return { ...order, profit, margin };
+        profit: p?.profit ?? null,
+        margin: p?.margin ?? null,
+        cmv:    p?.productCost ?? null,
+      };
     })
   );
 
-  // ── Venda por Canal (preparado para multi-marketplace; hoje só ML) ─────────
-  const vendaPorCanal = [
-    {
-      canal: "Mercado Livre",
-      qtd: totalOrders,
-      faturado: Math.round(totalRevenue * 100) / 100,
-      faturadoPct: 100,
-      cmv: canViewProfit ? Math.round(totalCmv * 100) / 100 : null,
-      cmvPct: canViewProfit && totalRevenue > 0 ? Math.round((totalCmv / totalRevenue) * 1000) / 10 : null,
-      margem: canViewProfit ? Math.round(totalProfit * 100) / 100 : null,
-      margemPct: canViewProfit ? Math.round(margin * 10) / 10 : null,
-      comissao: null,
-    },
-  ];
+  // ── KPIs ──────────────────────────────────────────────────────────────────
+  const totalRevenue = ordersWithProfit.reduce((acc, o) => acc + o.totalAmount, 0);
+  const totalOrders  = ordersWithProfit.length;
+  const avgTicket    = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+  const totalProfit  = canViewProfit
+    ? ordersWithProfit.reduce((acc, o) => acc + (o.profit ?? 0), 0)
+    : null;
+  const totalCmv = canViewProfit
+    ? ordersWithProfit.reduce((acc, o) => acc + (o.cmv ?? 0), 0)
+    : null;
+  const margin = canViewProfit && totalRevenue > 0
+    ? (totalProfit! / totalRevenue) * 100
+    : null;
 
-  // ── Venda por Estado (UF) ───────────────────────────────────────────────────
-  const stateMap: Record<string, { qtd: number; faturado: number; cmv: number; lucro: number }> = {};
-  for (const o of filteredOrders) {
-    const uf = (o as any).buyerState || "—";
-    if (!stateMap[uf]) stateMap[uf] = { qtd: 0, faturado: 0, cmv: 0, lucro: 0 };
-    stateMap[uf].qtd += 1;
-    stateMap[uf].faturado += o.totalAmount;
-    if (canViewProfit) {
-      const r = calcProfit(o);
-      stateMap[uf].cmv += r.cmv;
-      stateMap[uf].lucro += r.profit;
-    }
+  // ── Receita mensal (últimos 6 meses) ──────────────────────────────────────
+  const monthlyMap = new Map<string, { receita: number; lucro: number; qtd: number }>();
+  for (const o of ordersWithProfit) {
+    const mes = o.dateCreated.toISOString().slice(0, 7); // "2026-07"
+    const cur = monthlyMap.get(mes) ?? { receita: 0, lucro: 0, qtd: 0 };
+    cur.receita += o.totalAmount;
+    cur.lucro   += o.profit ?? 0;
+    cur.qtd     += 1;
+    monthlyMap.set(mes, cur);
   }
-  const vendaPorEstado = Object.entries(stateMap)
+  const monthlyData = [...monthlyMap.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-6)
+    .map(([mes, v]) => ({
+      mes: new Date(mes + "-01").toLocaleDateString("pt-BR", { month: "short", year: "2-digit" }),
+      receita: Math.round(v.receita * 100) / 100,
+      lucro:   canViewProfit ? Math.round(v.lucro * 100) / 100 : null,
+      qtd:     v.qtd,
+    }));
+
+  // ── Status breakdown ──────────────────────────────────────────────────────
+  const statusMap = new Map<string, number>();
+  for (const o of ordersWithProfit) {
+    statusMap.set(o.status, (statusMap.get(o.status) ?? 0) + 1);
+  }
+  const statusBreakdown = [...statusMap.entries()].map(([status, count]) => ({ status, count }));
+
+  // ── Venda por canal ───────────────────────────────────────────────────────
+  const canalMap = new Map<string, { qtde: number; faturado: number; margem: number; cmv: number }>();
+  for (const o of ordersWithProfit) {
+    const canal = o.channelAccount?.channelType ?? "OUTRO";
+    const cur   = canalMap.get(canal) ?? { qtde: 0, faturado: 0, margem: 0, cmv: 0 };
+    cur.qtde     += 1;
+    cur.faturado += o.totalAmount;
+    cur.margem   += o.profit ?? 0;
+    cur.cmv      += o.cmv ?? 0;
+    canalMap.set(canal, cur);
+  }
+  const vendaPorCanal = [...canalMap.entries()].map(([canal, v]) => ({
+    canal,
+    qtde:        v.qtde,
+    faturado:    Math.round(v.faturado * 100) / 100,
+    faturadoPct: totalRevenue > 0 ? Math.round((v.faturado / totalRevenue) * 1000) / 10 : 0,
+    cmv:         canViewProfit ? Math.round(v.cmv * 100) / 100 : null,
+    cmvPct:      canViewProfit && v.faturado > 0 ? Math.round((v.cmv / v.faturado) * 1000) / 10 : null,
+    margem:      canViewProfit ? Math.round(v.margem * 100) / 100 : null,
+    margemPct:   canViewProfit && v.faturado > 0 ? Math.round((v.margem / v.faturado) * 1000) / 10 : null,
+  })).sort((a, b) => b.faturado - a.faturado);
+
+  // ── Venda por estado ──────────────────────────────────────────────────────
+  const estadoMap = new Map<string, { qtd: number; faturado: number; margem: number }>();
+  for (const o of ordersWithProfit) {
+    const uf = o.buyerState ?? "Desconhecido";
+    const cur = estadoMap.get(uf) ?? { qtd: 0, faturado: 0, margem: 0 };
+    cur.qtd     += 1;
+    cur.faturado += o.totalAmount;
+    cur.margem  += o.profit ?? 0;
+    estadoMap.set(uf, cur);
+  }
+  const vendaPorEstado = [...estadoMap.entries()]
     .map(([uf, v]) => ({
       uf,
-      qtd: v.qtd,
-      faturado: Math.round(v.faturado * 100) / 100,
+      qtd:         v.qtd,
+      faturado:    Math.round(v.faturado * 100) / 100,
       faturadoPct: totalRevenue > 0 ? Math.round((v.faturado / totalRevenue) * 1000) / 10 : 0,
-      cmv: canViewProfit ? Math.round(v.cmv * 100) / 100 : null,
-      cmvPct: canViewProfit && v.faturado > 0 ? Math.round((v.cmv / v.faturado) * 1000) / 10 : null,
-      margem: canViewProfit ? Math.round(v.lucro * 100) / 100 : null,
-      margemPct: canViewProfit && v.faturado > 0 ? Math.round((v.lucro / v.faturado) * 1000) / 10 : null,
-    }))
-    .sort((a, b) => b.faturado - a.faturado);
-
-  // ── Venda por Produto ───────────────────────────────────────────────────────
-  const productMap: Record<string, { sku: string; name: string; qtd: number; faturado: number; cmv: number; lucro: number }> = {};
-  for (const o of filteredOrders) {
-    const r = canViewProfit ? calcProfit(o) : null;
-    const itemsRevenue = o.items.reduce((a, i) => a + i.unitPrice * i.quantity, 0) || 1;
-
-    for (const item of o.items) {
-      const key = item.sku || item.title;
-      if (!productMap[key]) productMap[key] = { sku: item.sku || "—", name: item.title, qtd: 0, faturado: 0, cmv: 0, lucro: 0 };
-      productMap[key].qtd += item.quantity;
-      const itemRevenue = item.unitPrice * item.quantity;
-      productMap[key].faturado += itemRevenue;
-
-      if (canViewProfit && r) {
-        const proportion = itemRevenue / itemsRevenue;
-        productMap[key].cmv += r.cmv * proportion;
-        productMap[key].lucro += r.profit * proportion;
-      }
-    }
-  }
-  const vendaPorProduto = Object.values(productMap)
-    .map((p) => ({
-      sku: p.sku,
-      name: p.name,
-      qtd: p.qtd,
-      faturado: Math.round(p.faturado * 100) / 100,
-      faturadoPct: totalRevenue > 0 ? Math.round((p.faturado / totalRevenue) * 1000) / 10 : 0,
-      cmv: canViewProfit ? Math.round(p.cmv * 100) / 100 : null,
-      cmvPct: canViewProfit && p.faturado > 0 ? Math.round((p.cmv / p.faturado) * 1000) / 10 : null,
-      margem: canViewProfit ? Math.round(p.lucro * 100) / 100 : null,
-      margemPct: canViewProfit && p.faturado > 0 ? Math.round((p.lucro / p.faturado) * 1000) / 10 : null,
+      margemPct:   canViewProfit && v.faturado > 0 ? Math.round((v.margem / v.faturado) * 1000) / 10 : null,
     }))
     .sort((a, b) => b.faturado - a.faturado)
-    .slice(0, 50);
+    .slice(0, 20);
+
+  // ── Venda por produto ─────────────────────────────────────────────────────
+  const produtoMap = new Map<string, { name: string; qtd: number; faturado: number; margem: number }>();
+  for (const o of ordersWithProfit) {
+    for (const item of o.items) {
+      const key = item.sku ?? item.title;
+      const cur = produtoMap.get(key) ?? { name: item.title, qtd: 0, faturado: 0, margem: 0 };
+      cur.qtd     += item.quantity;
+      cur.faturado += item.unitPrice * item.quantity;
+      cur.margem  += o.profit != null ? (o.profit / (o.items.length || 1)) : 0;
+      produtoMap.set(key, cur);
+    }
+  }
+  const vendaPorProduto = [...produtoMap.entries()]
+    .map(([_, v]) => ({
+      name:      v.name,
+      qtd:       v.qtd,
+      faturado:  Math.round(v.faturado * 100) / 100,
+      margemPct: canViewProfit && v.faturado > 0 ? Math.round((v.margem / v.faturado) * 1000) / 10 : null,
+    }))
+    .sort((a, b) => b.faturado - a.faturado)
+    .slice(0, 20);
+
+  // ── Pedidos recentes ──────────────────────────────────────────────────────
+  const recentOrders = ordersWithProfit.slice(0, 10).map((o) => ({
+    id:          o.id,
+    mlId:        o.mlId ?? o.externalOrderId,
+    packId:      o.packId,
+    status:      o.status,
+    totalAmount: o.totalAmount,
+    dateCreated: o.dateCreated,
+    profit:      o.profit != null ? Math.round(o.profit * 100) / 100 : null,
+    margin:      o.margin,
+    items:       o.items.slice(0, 1),
+  }));
+
+  // ── Marcas disponíveis ────────────────────────────────────────────────────
+  const availableBrands = await prisma.productCost.findMany({
+    where:  { userId: liderId, marca: { not: null } },
+    select: { marca: true },
+    distinct: ["marca"],
+  });
 
   return res.json({
-    totalRevenue: Math.round(totalRevenue * 100) / 100,
+    totalRevenue:    Math.round(totalRevenue * 100) / 100,
+    totalCmv:        totalCmv != null ? Math.round(totalCmv * 100) / 100 : null,
+    totalProfit:     totalProfit != null ? Math.round(totalProfit * 100) / 100 : null,
+    margin:          margin != null ? Math.round(margin * 100) / 100 : null,
     totalOrders,
-    avgTicket: Math.round(avgTicket * 100) / 100,
-    totalProfit: canViewProfit ? Math.round(totalProfit * 100) / 100 : null,
-    totalCmv: canViewProfit ? Math.round(totalCmv * 100) / 100 : null,
-    margin: canViewProfit ? Math.round(margin * 10) / 10 : null,
+    avgTicket:       Math.round(avgTicket * 100) / 100,
     monthlyData,
-    recentOrders,
-    statusBreakdown: statusBreakdown.map((s) => ({ status: s.status, count: s._count.id })),
+    statusBreakdown,
     vendaPorCanal,
     vendaPorEstado,
     vendaPorProduto,
-availableBrands,
-    selectedBrands: brands,
-    selectedDateFrom: dateFrom ?? null,
-    selectedDateTo: dateTo ?? null,
+    recentOrders,
+    availableBrands: availableBrands.map((b) => b.marca).filter(Boolean),
   });
 });
 
