@@ -18,7 +18,7 @@ const SHOPEE_BASE = process.env.SHOPEE_ENV === "test"
   ? "https://partner.test-stable.shopeemobile.com"
   : "https://openplatform.shopee.com.br";
 const PARTNER_ID  = parseInt(process.env.SHOPEE_PARTNER_ID!);
-const PARTNER_KEY = process.env.SHOPEE_PARTNER_KEY!;
+const PARTNER_KEY = process.env.SHOPEE_PARTNER_KEY!.trim();
 
 const MAX_WINDOW_SECONDS = 15 * 24 * 60 * 60;
 const refreshInFlight    = new Map<string, Promise<TokenPair>>();

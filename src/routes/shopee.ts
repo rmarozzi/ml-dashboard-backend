@@ -16,7 +16,7 @@ const SHOPEE_BASE  = process.env.SHOPEE_ENV === "test"
   : "https://openplatform.shopee.com.br";
 
 const PARTNER_ID   = parseInt(process.env.SHOPEE_PARTNER_ID!);
-const PARTNER_KEY  = process.env.SHOPEE_PARTNER_KEY!;
+const PARTNER_KEY = process.env.SHOPEE_PARTNER_KEY!.trim();
 const REDIRECT_URI = process.env.SHOPEE_REDIRECT_URI!;
 const STATE_SECRET = process.env.SHOPEE_STATE_SECRET ?? process.env.TOKEN_ENCRYPTION_KEY!;
 
