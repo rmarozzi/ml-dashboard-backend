@@ -171,42 +171,54 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   // ─── TIER 1 — INCREMENTAL ───────────────────────────────────────────────────
 
   async *discoverUpdatedOrders(
-    account: ChannelAccount,
-    since: Date,
-    until: Date
-  ): AsyncGenerator<NormalizedOrder[]> {
-    const token = await this.getAccessToken(account);
-    const ml    = this.mlClient(token);
-    const mp    = this.mpClient(token);
-    let offset  = 0;
-    const limit = 50;
-
-    while (true) {
-      if (offset > 9950) break;
-
-      const res = await withRetry(() =>
-        ml.get("/orders/search", {
-          params: {
-            seller:                         account.externalAccountId,
-            "order.date_last_updated.from": since.toISOString(),
-            "order.date_last_updated.to":   until.toISOString(),
-            sort:                           "date_last_updated_asc",
-            offset,
-            limit,
-          },
-        })
-      );
-
-      const results: any[] = res.data?.results ?? [];
-      if (results.length === 0) break;
-
-      const normalized = await this.normalizeMany(results, account, ml, mp);
-      if (normalized.length > 0) yield normalized;
-
-      if (results.length < limit) break;
-      offset += limit;
+  account: ChannelAccount,
+  since: Date,
+  until: Date
+): AsyncGenerator<NormalizedOrder[]> {
+  // Quebra janelas > 1 dia em chunks diários para evitar erro 400 do ML
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+  if (until.getTime() - since.getTime() > ONE_DAY) {
+    let cursor = new Date(since);
+    while (cursor < until) {
+      const chunkEnd = new Date(Math.min(cursor.getTime() + ONE_DAY, until.getTime()));
+      yield* this.discoverUpdatedOrders(account, cursor, chunkEnd);
+      cursor = chunkEnd;
     }
+    return;
   }
+
+  const token = await this.getAccessToken(account);
+  const ml    = this.mlClient(token);
+  const mp    = this.mpClient(token);
+  let offset  = 0;
+  const limit = 50;
+
+  while (true) {
+    if (offset > 9950) break;
+
+    const res = await withRetry(() =>
+      ml.get("/orders/search", {
+        params: {
+          seller:                         account.externalAccountId,
+          "order.date_last_updated.from": since.toISOString(),
+          "order.date_last_updated.to":   until.toISOString(),
+          sort:                           "date_last_updated_asc",
+          offset,
+          limit,
+        },
+      })
+    );
+
+    const results: any[] = res.data?.results ?? [];
+    if (results.length === 0) break;
+
+    const normalized = await this.normalizeMany(results, account, ml, mp);
+    if (normalized.length > 0) yield normalized;
+
+    if (results.length < limit) break;
+    offset += limit;
+  }
+}
 
   // ─── TIER 2 — RECHECK ───────────────────────────────────────────────────────
 
