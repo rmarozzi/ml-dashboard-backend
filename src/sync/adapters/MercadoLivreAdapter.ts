@@ -195,14 +195,18 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
         ml.get("/orders/search", {
           params: {
             seller:                         account.externalAccountId,
-            "order.date_last_updated.from": since.toISOString(),
-            "order.date_last_updated.to":   until.toISOString(),
-            sort:                           "date_last_updated_asc",
+            "order.date_last_updated.from": mlDate(since),
+            "order.date_last_updated.to":   mlDate(until),
+            sort:                           "date_asc",
             offset,
             limit,
           },
         })
       );
+	  // Formato de data aceito pelo ML: 2026-07-12T13:21:00.000-00:00 (sem sufixo Z)
+		function mlDate(d: Date): string {
+		return d.toISOString().replace("Z", "-00:00");
+	}
 
       const results: any[] = res.data?.results ?? [];
       if (results.length === 0) break;

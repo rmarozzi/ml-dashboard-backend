@@ -89,16 +89,14 @@ export class SyncEngine {
       }
     } catch (err: any) {
       const status = err?.response?.status;
-      // 400/403 no Tier1 é tolerável — webhooks cobrem atualizações em tempo real
       if (status === 400 || status === 403) {
-        console.warn(`[SyncEngine][Tier1] ML retornou ${status} — ignorando (webhooks ativos)`);
-        await this.finishLog(logId, SyncStatus.PARTIAL, { ordersFound, ordersUpserted, errorDetail: `HTTP ${status}` });
+        console.warn(`[SyncEngine][Tier1] ML retornou ${status} — body:`, JSON.stringify(err?.response?.data)?.slice(0, 300));
+        await this.finishLog(logId, SyncStatus.PARTIAL, { ordersFound, ordersUpserted, errorDetail: `HTTP ${status}: ${JSON.stringify(err?.response?.data)?.slice(0, 200)}` });
         return;
       }
       console.error(`[SyncEngine][Tier1] Erro:`, err?.message);
       await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
     }
-  }
 
   // ─── TIER 2 — RECHECK DE ASSENTAMENTO ──────────────────────────────────────
 
