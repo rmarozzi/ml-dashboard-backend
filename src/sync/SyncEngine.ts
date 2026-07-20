@@ -43,8 +43,7 @@ export class SyncEngine {
         console.log(`[SyncEngine][Tier0] Lote: ${batch.length} encontrados, ${ordersUpserted} persistidos total`);
       }
 
-      // ✅ CRÍTICO: marca como concluído ANTES do finishLog
-      // Se o finishLog falhar (log apagado externamente), o initialSyncDone já foi gravado
+      // ✅ Marca como concluído ANTES do finishLog
       await prisma.channelAccount.update({
         where: { id: account.id },
         data:  { initialSyncDone: true, lastSyncAt: new Date() },
@@ -90,13 +89,19 @@ export class SyncEngine {
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 400 || status === 403) {
-        console.warn(`[SyncEngine][Tier1] ML retornou ${status} — body:`, JSON.stringify(err?.response?.data)?.slice(0, 300));
-        await this.finishLog(logId, SyncStatus.PARTIAL, { ordersFound, ordersUpserted, errorDetail: `HTTP ${status}: ${JSON.stringify(err?.response?.data)?.slice(0, 200)}` });
+        const body = JSON.stringify(err?.response?.data ?? {}).slice(0, 300);
+        console.warn(`[SyncEngine][Tier1] ML retornou ${status} — body: ${body}`);
+        await this.finishLog(logId, SyncStatus.PARTIAL, {
+          ordersFound,
+          ordersUpserted,
+          errorDetail: `HTTP ${status}: ${body.slice(0, 200)}`,
+        });
         return;
       }
       console.error(`[SyncEngine][Tier1] Erro:`, err?.message);
       await this.finishLog(logId, SyncStatus.FAILED, { ordersFound, ordersUpserted, errorDetail: err?.message });
     }
+  }
 
   // ─── TIER 2 — RECHECK DE ASSENTAMENTO ──────────────────────────────────────
 
@@ -120,7 +125,9 @@ export class SyncEngine {
           },
         },
       },
-      select: { externalOrderId: true },
+      select:  { externalOrderId: true },
+      orderBy: { dateCreated: "asc" },
+      take:    300, // limita o lote por execução — espalha a carga
     });
 
     if (unsettled.length === 0) return;
@@ -204,7 +211,6 @@ export class SyncEngine {
             },
           });
 
-          // Pagamentos
           for (const payment of order.payments) {
             if (!payment.externalPaymentId) continue;
             await tx.payment.upsert({
@@ -222,13 +228,11 @@ export class SyncEngine {
               update: {
                 status:          payment.status,
                 totalPaidAmount: payment.totalPaidAmount,
-                ...(payment.moneyReleaseDate  != null && { moneyReleaseDate:  payment.moneyReleaseDate }),
-                ...(payment.netReceivedAmount != null && { netReceivedAmount: payment.netReceivedAmount }),
+                ...(payment.moneyReleaseDate != null && { moneyReleaseDate: payment.moneyReleaseDate }),
               },
             });
           }
 
-          // Itens — imutáveis após a venda, só cria na primeira vez
           if (order.items.length > 0) {
             const exists = await tx.item.count({ where: { orderId: saved.id } });
             if (exists === 0) {
@@ -246,7 +250,6 @@ export class SyncEngine {
             }
           }
 
-          // Envio
           if (order.shipment) {
             await tx.shipment.upsert({
               where:  { orderId: saved.id },
@@ -302,7 +305,6 @@ export class SyncEngine {
         },
       });
     } catch (err: any) {
-      // P2025 = record not found (log apagado externamente) — não é crítico
       if (err?.code === "P2025") {
         console.warn(`[SyncEngine] finishLog: log ${logId} não encontrado — ignorando`);
         return;
