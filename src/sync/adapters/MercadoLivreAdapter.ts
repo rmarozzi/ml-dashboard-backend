@@ -169,12 +169,13 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     since: Date,
     until: Date
   ): AsyncGenerator<NormalizedOrder[]> {
-    // Quebra janelas > 1 dia em chunks diários para evitar erro 400 do ML
-    const ONE_DAY = 24 * 60 * 60 * 1000;
-    if (until.getTime() - since.getTime() > ONE_DAY) {
+    // Quebra janelas > 6h em chunks para evitar erro 400/403 do ML
+    // O ML exige seller + filtros de data, mas rejeita janelas muito grandes
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    if (until.getTime() - since.getTime() > SIX_HOURS) {
       let cursor = new Date(since);
       while (cursor < until) {
-        const chunkEnd = new Date(Math.min(cursor.getTime() + ONE_DAY, until.getTime()));
+        const chunkEnd = new Date(Math.min(cursor.getTime() + SIX_HOURS, until.getTime()));
         yield* this.discoverUpdatedOrders(account, cursor, chunkEnd);
         cursor = chunkEnd;
       }
@@ -193,8 +194,7 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const res = await withRetry(() =>
         ml.get("/orders/search", {
           params: {
-            // ✅ Sem seller — token já identifica o vendedor
-            // seller + filtros de data = erro 400/403 do ML
+            seller:                         account.externalAccountId,
             "order.date_last_updated.from": since.toISOString(),
             "order.date_last_updated.to":   until.toISOString(),
             sort:                           "date_last_updated_asc",
