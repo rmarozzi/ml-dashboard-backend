@@ -20,8 +20,6 @@ const CONCURRENCY   = 6;
 
 const refreshInFlight = new Map<string, Promise<TokenPair>>();
 
-// ─── UTILITÁRIOS ────────────────────────────────────────────────────────────
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -59,8 +57,6 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 4): Promise<T> {
   }
 }
 
-// ─── TIPOS INTERNOS ──────────────────────────────────────────────────────────
-
 interface ShipmentData {
   status:         string;
   trackingNumber: string | null;
@@ -68,8 +64,6 @@ interface ShipmentData {
   state:          string | null;
   cost:           number | null;
 }
-
-// ─── ADAPTER ────────────────────────────────────────────────────────────────
 
 export class MercadoLivreAdapter implements ChannelSyncAdapter {
   readonly channelType = ChannelType.MERCADO_LIVRE;
@@ -171,54 +165,55 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   // ─── TIER 1 — INCREMENTAL ───────────────────────────────────────────────────
 
   async *discoverUpdatedOrders(
-  account: ChannelAccount,
-  since: Date,
-  until: Date
-): AsyncGenerator<NormalizedOrder[]> {
-  // Quebra janelas > 1 dia em chunks diários para evitar erro 400 do ML
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-  if (until.getTime() - since.getTime() > ONE_DAY) {
-    let cursor = new Date(since);
-    while (cursor < until) {
-      const chunkEnd = new Date(Math.min(cursor.getTime() + ONE_DAY, until.getTime()));
-      yield* this.discoverUpdatedOrders(account, cursor, chunkEnd);
-      cursor = chunkEnd;
+    account: ChannelAccount,
+    since: Date,
+    until: Date
+  ): AsyncGenerator<NormalizedOrder[]> {
+    // Quebra janelas > 1 dia em chunks diários para evitar erro 400 do ML
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    if (until.getTime() - since.getTime() > ONE_DAY) {
+      let cursor = new Date(since);
+      while (cursor < until) {
+        const chunkEnd = new Date(Math.min(cursor.getTime() + ONE_DAY, until.getTime()));
+        yield* this.discoverUpdatedOrders(account, cursor, chunkEnd);
+        cursor = chunkEnd;
+      }
+      return;
     }
-    return;
+
+    const token = await this.getAccessToken(account);
+    const ml    = this.mlClient(token);
+    const mp    = this.mpClient(token);
+    let offset  = 0;
+    const limit = 50;
+
+    while (true) {
+      if (offset > 9950) break;
+
+      const res = await withRetry(() =>
+        ml.get("/orders/search", {
+          params: {
+            // ✅ Sem seller — token já identifica o vendedor
+            // seller + filtros de data = erro 400/403 do ML
+            "order.date_last_updated.from": since.toISOString(),
+            "order.date_last_updated.to":   until.toISOString(),
+            sort:                           "date_last_updated_asc",
+            offset,
+            limit,
+          },
+        })
+      );
+
+      const results: any[] = res.data?.results ?? [];
+      if (results.length === 0) break;
+
+      const normalized = await this.normalizeMany(results, account, ml, mp);
+      if (normalized.length > 0) yield normalized;
+
+      if (results.length < limit) break;
+      offset += limit;
+    }
   }
-
-  const token = await this.getAccessToken(account);
-  const ml    = this.mlClient(token);
-  const mp    = this.mpClient(token);
-  let offset  = 0;
-  const limit = 50;
-
-  while (true) {
-    if (offset > 9950) break;
-
-    const res = await withRetry(() =>
-      ml.get("/orders/search", {
-        params: {
-          seller:                         account.externalAccountId,
-          "order.date_last_updated.from": since.toISOString(),
-          "order.date_last_updated.to":   until.toISOString(),
-          sort:                           "date_last_updated_asc",
-          offset,
-          limit,
-        },
-      })
-    );
-
-    const results: any[] = res.data?.results ?? [];
-    if (results.length === 0) break;
-
-    const normalized = await this.normalizeMany(results, account, ml, mp);
-    if (normalized.length > 0) yield normalized;
-
-    if (results.length < limit) break;
-    offset += limit;
-  }
-}
 
   // ─── TIER 2 — RECHECK ───────────────────────────────────────────────────────
 
@@ -271,7 +266,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     ml: AxiosInstance,
     mp: AxiosInstance
   ): Promise<NormalizedOrder[]> {
-    // 1. Busca detalhes completos de cada pedido em paralelo
     const detailed = await runWithConcurrency(raws, CONCURRENCY, async (raw) => {
       try {
         const res = await withRetry(() => ml.get(`/orders/${raw.id}`));
@@ -281,7 +275,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       }
     });
 
-    // 2. Cache de shipment por shipmentId único
     const uniqueShipmentIds = [...new Set(
       detailed.map((o) => o.shipping?.id).filter(Boolean).map(String)
     )];
@@ -292,7 +285,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       shipmentCache.set(shipmentId, data);
     });
 
-    // 3. Normaliza todos com cache compartilhado
     const results = await runWithConcurrency(detailed, CONCURRENCY, async (raw) => {
       return this.normalizeSingle(raw, account, ml, mp, shipmentCache);
     });
@@ -312,7 +304,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
     const orderId    = String(raw.id);
     const shipmentId = raw.shipping?.id ? String(raw.shipping.id) : null;
 
-    // ── Shipment (usa cache) ──────────────────────────────────────────────────
     let shipmentData: ShipmentData = {
       status: "", trackingNumber: null, city: null, state: null, cost: null,
     };
@@ -320,7 +311,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       shipmentData = shipmentCache.get(shipmentId) ?? await this.fetchShipmentData(ml, shipmentId);
     }
 
-    // ── Rateio de frete por pack ──────────────────────────────────────────────
     let shippingCost = shipmentData.cost;
     if (raw.pack_id && shippingCost != null) {
       shippingCost = await this.getProportionalShippingCost(
@@ -328,7 +318,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       );
     }
 
-    // ── Billing info — nome real + CPF/CNPJ ──────────────────────────────────
     let buyerName:      string | null = null;
     let buyerDocType:   string | null = null;
     let buyerDocNumber: string | null = null;
@@ -341,13 +330,11 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       buyerDocNumber = billing.docNumber;
     }
 
-    // Fallback: billing_info direto no pedido (legado)
     if (!buyerDocType && raw.billing_info?.doc_type) {
       buyerDocType   = raw.billing_info.doc_type;
       buyerDocNumber = raw.billing_info.doc_number ?? null;
     }
 
-    // ── Pagamentos + Mercado Pago ─────────────────────────────────────────────
     const payments: NormalizedPayment[] = await runWithConcurrency(
       raw.payments ?? [],
       CONCURRENCY,
@@ -377,7 +364,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       }
     );
 
-    // ── Itens ─────────────────────────────────────────────────────────────────
     const items: NormalizedItem[] = (raw.order_items ?? []).map((i: any) => ({
       externalItemId: i.item?.id ?? null,
       title:          i.item?.title ?? "",
@@ -387,7 +373,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       saleFee:        i.sale_fee ?? 0,
     }));
 
-    // ── Shipment ──────────────────────────────────────────────────────────────
     let shipment: NormalizedShipment | null = null;
     if (shipmentId) {
       shipment = {
@@ -398,7 +383,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       };
     }
 
-    // ── Net received ──────────────────────────────────────────────────────────
     const netReceived = payments
       .filter((p) => p.operationType === "regular_payment" && p.netReceivedAmount != null)
       .reduce((acc, p) => acc + (p.netReceivedAmount ?? 0), 0) || null;
@@ -463,7 +447,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
   }
 
   // ─── ENDPOINT: BILLING INFO ───────────────────────────────────────────────────
-  // ✅ FIX: estrutura correta é res.data.buyer.billing_info (não res.data diretamente)
 
   private async fetchBillingInfo(
     ml: AxiosInstance,
@@ -473,7 +456,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
       const res     = await withRetry(() =>
         ml.get(`/orders/billing-info/${SITE_ID}/${billingInfoId}`)
       );
-      // ✅ Estrutura real: res.data.buyer.billing_info.name + last_name
       const billing = res.data?.buyer?.billing_info;
       const name    = billing?.name && billing?.last_name
         ? `${billing.name} ${billing.last_name}`.trim()
@@ -484,7 +466,6 @@ export class MercadoLivreAdapter implements ChannelSyncAdapter {
         docNumber: billing?.identification?.number ?? null,
       };
     } catch {
-      // Fallback legado
       try {
         const res = await withRetry(() =>
           ml.get(`/orders/${billingInfoId}/billing_info`, { headers: { "x-version": "2" } })
